@@ -1,0 +1,101 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rohlik-mcp"
+dynamic = ["version"]
+description = "Model Context Protocol (MCP) server for the Rohlik.cz API"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Daniel Vejsada", email = "dan.vejsada@gmail.com"}
+]
+keywords = ["rohlik", "mcp", "model-context-protocol", "grocery", "api"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: AsyncIO",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "fastmcp>=3.0.0",
+    # Until rohlik-api is published to PyPI, depend on it directly from GitHub.
+    # After publishing, replace this with: "rohlik-api>=0.1.0"
+    "rohlik-api @ git+https://github.com/dvejsada/rohlik_api_python@claude/rohlik-api-python-package-hrvx56",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "black>=24.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]
+
+[project.scripts]
+rohlik-mcp = "rohlik_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/dvejsada/rohlik-mcp"
+Repository = "https://github.com/dvejsada/rohlik-mcp"
+Issues = "https://github.com/dvejsada/rohlik-mcp/issues"
+
+[tool.setuptools.packages.find]
+include = ["rohlik_mcp*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "rohlik_mcp.__version__"}
+
+[tool.setuptools.package-data]
+rohlik_mcp = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
