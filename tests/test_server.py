@@ -73,6 +73,18 @@ class TestProductTools:
         assert isinstance(result, str)
         assert "No data" in result
 
+    async def test_get_product_detail(self, mock_client):
+        mock_client.products.get_detail = AsyncMock(return_value={"id": 123, "name": "Milk"})
+        result = await server.get_product_detail(123)
+        assert result == {"id": 123, "name": "Milk"}
+        mock_client.products.get_detail.assert_awaited_once_with(123)
+
+    async def test_get_product_categories(self, mock_client):
+        mock_client.products.get_categories = AsyncMock(return_value=[{"id": 1, "name": "Dairy"}])
+        result = await server.get_product_categories(123)
+        assert result == [{"id": 1, "name": "Dairy"}]
+        mock_client.products.get_categories.assert_awaited_once_with(123)
+
 
 class TestCartTools:
     async def test_get_cart(self, mock_client):
@@ -93,6 +105,16 @@ class TestCartTools:
         result = await server.add_to_cart(123)
         assert result == {"added": False, "product_id": 123}
 
+    async def test_add_items_to_cart_partial(self, mock_client):
+        mock_client.cart.add_items = AsyncMock(return_value=[123])
+        result = await server.add_items_to_cart(
+            [{"product_id": 123, "quantity": 2}, {"product_id": 456}]
+        )
+        assert result == {"added": [123], "failed": [456]}
+        mock_client.cart.add_items.assert_awaited_once_with(
+            [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
+        )
+
     async def test_remove_from_cart(self, mock_client):
         mock_client.cart.delete_item = AsyncMock()
         result = await server.remove_from_cart("f1")
@@ -103,6 +125,32 @@ class TestCartTools:
         mock_client.cart.delete_item = AsyncMock(side_effect=APIRequestFailedError("boom"))
         result = await server.remove_from_cart("f1")
         assert result == {"error": "boom"}
+
+
+class TestOrderTools:
+    async def test_get_order_detail(self, mock_client):
+        mock_client.orders.get_detail = AsyncMock(return_value={"id": 555, "state": "DELIVERED"})
+        result = await server.get_order_detail(555)
+        assert result == {"id": 555, "state": "DELIVERED"}
+        mock_client.orders.get_detail.assert_awaited_once_with(555)
+
+
+class TestAccountAndDeliveryTools:
+    async def test_get_premium_profile(self, mock_client):
+        mock_client.account.get_premium_profile = AsyncMock(return_value={"active": True})
+        assert await server.get_premium_profile() == {"active": True}
+
+    async def test_get_bags_info(self, mock_client):
+        mock_client.account.get_bags_info = AsyncMock(return_value={"count": 3})
+        assert await server.get_bags_info() == {"count": 3}
+
+    async def test_get_announcements(self, mock_client):
+        mock_client.account.get_announcements = AsyncMock(return_value=[])
+        assert await server.get_announcements() == []
+
+    async def test_get_timeslot_reservation(self, mock_client):
+        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value={"slot": "today"})
+        assert await server.get_timeslot_reservation() == {"slot": "today"}
 
 
 class TestErrorHandling:
@@ -122,6 +170,15 @@ class TestServerMetadata:
         assert "add_to_cart" in names
         assert "search_recipes" in names
         assert "get_account_overview" in names
+        # newly added tools
+        assert "get_product_detail" in names
+        assert "get_product_categories" in names
+        assert "add_items_to_cart" in names
+        assert "get_order_detail" in names
+        assert "get_timeslot_reservation" in names
+        assert "get_premium_profile" in names
+        assert "get_bags_info" in names
+        assert "get_announcements" in names
 
     async def test_call_tool_in_memory(self, mock_client):
         """End-to-end: invoke a tool through the FastMCP client."""

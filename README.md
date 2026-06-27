@@ -92,8 +92,11 @@ For stdio-only clients, bridge to the HTTP endpoint with
 | `get_product_price`        | Current price and price-per-unit for a product       |
 | `get_product_composition`  | Nutritional values, ingredients and allergens        |
 | `get_product_ai_summary`   | AI-generated product summary                          |
+| `get_product_detail`       | Full product detail                                   |
+| `get_product_categories`   | Category breadcrumb for a product                     |
 | `get_cart`                 | Current cart contents and total                       |
 | `add_to_cart`              | Add a product to the cart                             |
+| `add_items_to_cart`        | Add several products to the cart in one call          |
 | `remove_from_cart`         | Remove an item from the cart                          |
 | `search_recipes`           | Search recipes (Rohlík Chef)                          |
 | `get_recipe_detail`        | Full recipe with ingredients and directions           |
@@ -101,12 +104,18 @@ For stdio-only clients, bridge to the HTTP endpoint with
 | `get_next_order`           | Next upcoming order                                   |
 | `get_last_order`           | Most recent delivered order                           |
 | `get_delivered_orders`     | History of delivered orders                           |
+| `get_order_detail`         | Full detail of a single order by ID                   |
 | `get_delivery_info`        | First-delivery information                            |
 | `get_next_delivery_slots`  | Next available delivery slots                         |
+| `get_timeslot_reservation` | Currently reserved delivery timeslot                  |
 | `get_shopping_list`        | A saved shopping list by ID                           |
 | `get_account_overview`     | Aggregated account snapshot (cart, orders, delivery)  |
+| `get_premium_profile`      | Premium (membership) profile                          |
+| `get_bags_info`            | Reusable shopping bags information                    |
+| `get_announcements`        | Account announcements                                 |
 
-`add_to_cart` and `remove_from_cart` modify your real Rohlik cart.
+`add_to_cart`, `add_items_to_cart` and `remove_from_cart` modify your real
+Rohlik cart.
 
 ## Development
 
