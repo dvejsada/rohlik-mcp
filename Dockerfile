@@ -4,11 +4,6 @@ FROM python:3.13-slim AS build
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# git is needed to install the rohlik-api dependency from GitHub
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # Build a self-contained virtualenv with the package and its dependencies
