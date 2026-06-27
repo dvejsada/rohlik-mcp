@@ -1,8 +1,8 @@
 name: Publish Docker image
 
-# Builds the Docker image and pushes it to Docker Hub whenever a GitHub
-# Release is published. Requires the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN
-# repository secrets (the token is a Docker Hub access token).
+# Builds the Docker image and pushes it to Docker Hub (georgx22/rohlik-mcp)
+# whenever a GitHub Release is published. Requires the DOCKERHUB_USERNAME and
+# DOCKERHUB_TOKEN repository secrets (the token is a Docker Hub access token).
 on:
   release:
     types: [published]
@@ -34,7 +34,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKERHUB_USERNAME }}/rohlik-mcp
+          images: georgx22/rohlik-mcp
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

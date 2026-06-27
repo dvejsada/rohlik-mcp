@@ -33,16 +33,22 @@ Credentials and the HTTP bind settings are read from environment variables:
 
 ## Running with Docker (recommended)
 
-```bash
-docker build -t rohlik-mcp .
+Pull the published image from Docker Hub:
 
+```bash
 docker run --rm -p 8000:8000 \
   -e ROHLIK_USERNAME="your_email@example.com" \
   -e ROHLIK_PASSWORD="your_password" \
-  rohlik-mcp
+  georgx22/rohlik-mcp
 ```
 
 The Streamable HTTP endpoint is then available at `http://localhost:8000/mcp/`.
+
+To build the image locally instead:
+
+```bash
+docker build -t rohlik-mcp .
+```
 
 ## Running from source
 
