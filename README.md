@@ -86,7 +86,8 @@ Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
 By default the endpoint is **unauthenticated** — anyone who can reach it can use
 the tools (including the ones that change your real cart). If the server is
 reachable beyond your own machine, set **`ROHLIK_MCP_AUTH_TOKEN`** to a long
-random string; clients must then send it as a bearer token:
+random string; clients must then send it as a bearer token. Use this config
+**instead of** the plain one above:
 
 ```json
 {
@@ -98,6 +99,10 @@ random string; clients must then send it as a bearer token:
   }
 }
 ```
+
+> The `headers` field is supported by Streamable-HTTP-capable clients. On
+> stdio-only clients (e.g. via `mcp-remote`), pass the header the way that tool
+> documents it instead.
 
 > The static token is a lightweight gate suitable for a personal, self-hosted
 > server. For anything internet-exposed, also put it behind TLS / a reverse

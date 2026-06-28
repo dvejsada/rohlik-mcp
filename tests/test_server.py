@@ -227,6 +227,10 @@ class TestAuth:
         monkeypatch.delenv("ROHLIK_MCP_AUTH_TOKEN", raising=False)
         assert server._build_auth() is None
 
+    def test_empty_token_means_no_auth(self, monkeypatch):
+        monkeypatch.setenv("ROHLIK_MCP_AUTH_TOKEN", "")
+        assert server._build_auth() is None
+
     def test_token_builds_verifier(self, monkeypatch):
         from fastmcp.server.auth import StaticTokenVerifier
 

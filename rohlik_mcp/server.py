@@ -13,13 +13,15 @@ import os
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
-from fastmcp.server.auth import StaticTokenVerifier
 from rohlik_api import RohlikAPI, RohlikAPIError
 
 from .config import Config
+
+if TYPE_CHECKING:
+    from fastmcp.server.auth import StaticTokenVerifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,6 +99,10 @@ def _build_auth() -> StaticTokenVerifier | None:
     token = os.environ.get("ROHLIK_MCP_AUTH_TOKEN")
     if not token:
         return None
+    # Imported lazily so a missing/renamed symbol only breaks startup when auth
+    # is actually configured, not for the default unauthenticated server.
+    from fastmcp.server.auth import StaticTokenVerifier
+
     return StaticTokenVerifier(tokens={token: {"client_id": "rohlik-mcp"}})
 
 
