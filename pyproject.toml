@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=3.0.0",
-    "rohlik-api>=0.1.0",
+    "rohlik-api>=0.2.0",
 ]
 
 [project.optional-dependencies]
