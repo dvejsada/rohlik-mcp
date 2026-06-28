@@ -177,18 +177,27 @@ async def add_items_to_cart(items: list[dict[str, int]]) -> ToolResult:
         items: A list of ``{"product_id": <int>, "quantity": <int>}`` entries.
             ``quantity`` defaults to 1 when omitted.
 
-    Returns a list of the product IDs that were successfully added.
+    Returns the product IDs that were successfully added and any that failed.
     """
-    payload = [
-        {"product_id": int(item["product_id"]), "quantity": int(item.get("quantity", 1))}
-        for item in items
-    ]
+    try:
+        payload = [
+            {"product_id": int(item["product_id"]), "quantity": int(item.get("quantity", 1))}
+            for item in items
+        ]
+    except (KeyError, TypeError, ValueError) as err:
+        return {
+            "error": f"Each item needs an integer 'product_id' (and optional 'quantity'): {err}"
+        }
+
     requested = [entry["product_id"] for entry in payload]
     added = await _call(get_client().cart.add_items(payload))
-    added_ids = added if isinstance(added, list) else []
+    if not isinstance(added, list):
+        # _call returned an error payload (or "no data") — surface it unchanged
+        # instead of masking it as every item having failed.
+        return added
     return {
-        "added": added_ids,
-        "failed": [pid for pid in requested if pid not in added_ids],
+        "added": added,
+        "failed": [pid for pid in requested if pid not in added],
     }
 
 

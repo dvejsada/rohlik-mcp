@@ -115,6 +115,18 @@ class TestCartTools:
             [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
         )
 
+    async def test_add_items_to_cart_surfaces_api_error(self, mock_client):
+        mock_client.cart.add_items = AsyncMock(side_effect=APIRequestFailedError("auth failed"))
+        result = await server.add_items_to_cart([{"product_id": 123}])
+        assert result == {"error": "auth failed"}
+
+    async def test_add_items_to_cart_malformed_input(self, mock_client):
+        mock_client.cart.add_items = AsyncMock()
+        result = await server.add_items_to_cart([{"quantity": 2}])
+        assert isinstance(result, dict)
+        assert "error" in result
+        mock_client.cart.add_items.assert_not_awaited()
+
     async def test_remove_from_cart(self, mock_client):
         mock_client.cart.delete_item = AsyncMock()
         result = await server.remove_from_cart("f1")
