@@ -131,6 +131,18 @@ async def get_product_ai_summary(product_id: int) -> ToolResult:
     return await _call(get_client().products.get_ai_summary(product_id))
 
 
+@mcp.tool()
+async def get_product_detail(product_id: int) -> ToolResult:
+    """Get the full detail for a product (name, images, description, badges, etc.)."""
+    return await _call(get_client().products.get_detail(product_id))
+
+
+@mcp.tool()
+async def get_product_categories(product_id: int) -> ToolResult:
+    """Get the category breadcrumb a product belongs to."""
+    return await _call(get_client().products.get_categories(product_id))
+
+
 # ---------------------------------------------------------------------------
 # Cart
 # ---------------------------------------------------------------------------
@@ -152,9 +164,45 @@ async def add_to_cart(product_id: int, quantity: int = 1) -> ToolResult:
     """
     client = get_client()
     added = await _call(client.cart.add_items([{"product_id": product_id, "quantity": quantity}]))
-    if isinstance(added, list) and product_id in added:
+    if not isinstance(added, list):
+        # _call returned an error payload (or "no data") — surface it unchanged
+        # instead of masking it as the product having failed to add.
+        return added
+    if product_id in added:
         return {"added": True, "product_id": product_id, "quantity": quantity}
     return {"added": False, "product_id": product_id}
+
+
+@mcp.tool()
+async def add_items_to_cart(items: list[dict[str, int]]) -> ToolResult:
+    """Add several products to the cart in one call.
+
+    Args:
+        items: A list of ``{"product_id": <int>, "quantity": <int>}`` entries.
+            ``quantity`` defaults to 1 when omitted.
+
+    Returns the product IDs that were successfully added and any that failed.
+    """
+    try:
+        payload = [
+            {"product_id": int(item["product_id"]), "quantity": int(item.get("quantity", 1))}
+            for item in items
+        ]
+    except (KeyError, TypeError, ValueError) as err:
+        return {
+            "error": f"Each item needs an integer 'product_id' (and optional 'quantity'): {err}"
+        }
+
+    requested = [entry["product_id"] for entry in payload]
+    added = await _call(get_client().cart.add_items(payload))
+    if not isinstance(added, list):
+        # _call returned an error payload (or "no data") — surface it unchanged
+        # instead of masking it as every item having failed.
+        return added
+    return {
+        "added": added,
+        "failed": [pid for pid in requested if pid not in added],
+    }
 
 
 @mcp.tool()
@@ -221,6 +269,16 @@ async def get_delivered_orders(limit: int = 10, offset: int = 0) -> ToolResult:
 
 
 @mcp.tool()
+async def get_order_detail(order_id: int) -> ToolResult:
+    """Get the full detail of a single order, including its line items.
+
+    Use ``get_next_order``, ``get_last_order`` or ``get_delivered_orders`` to
+    find the ``order_id``.
+    """
+    return await _call(get_client().orders.get_detail(order_id))
+
+
+@mcp.tool()
 async def get_delivery_info() -> ToolResult:
     """Get first-delivery information for the account."""
     return await _call(get_client().delivery.get_info())
@@ -230,6 +288,12 @@ async def get_delivery_info() -> ToolResult:
 async def get_next_delivery_slots() -> ToolResult:
     """Get the next available delivery slots."""
     return await _call(get_client().delivery.get_next_slots())
+
+
+@mcp.tool()
+async def get_timeslot_reservation() -> ToolResult:
+    """Get the delivery timeslot currently reserved for the account, if any."""
+    return await _call(get_client().delivery.get_timeslot_reservation())
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +312,25 @@ async def get_account_overview() -> ToolResult:
     """Get an aggregated snapshot of the account.
 
     Includes delivery info, upcoming and recent orders, cart contents, premium
-    profile, announcements and delivery slots in a single call.
+    profile, announcements and delivery slots in a single call. Prefer the more
+    specific tools when only one piece of information is needed.
     """
     return await _call(get_client().get_data())
+
+
+@mcp.tool()
+async def get_premium_profile() -> ToolResult:
+    """Get the premium (Rohlik membership) profile for the account."""
+    return await _call(get_client().account.get_premium_profile())
+
+
+@mcp.tool()
+async def get_bags_info() -> ToolResult:
+    """Get information about reusable shopping bags for the account."""
+    return await _call(get_client().account.get_bags_info())
+
+
+@mcp.tool()
+async def get_announcements() -> ToolResult:
+    """Get current account announcements (banners, notices)."""
+    return await _call(get_client().account.get_announcements())
