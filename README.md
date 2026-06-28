@@ -81,6 +81,33 @@ Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
 }
 ```
 
+### 🔑 Authentication (optional)
+
+By default the endpoint is **unauthenticated** — anyone who can reach it can use
+the tools (including the ones that change your real cart). If the server is
+reachable beyond your own machine, set **`ROHLIK_MCP_AUTH_TOKEN`** to a long
+random string; clients must then send it as a bearer token. Use this config
+**instead of** the plain one above:
+
+```json
+{
+  "mcpServers": {
+    "rohlik": {
+      "url": "http://localhost:8000/mcp/",
+      "headers": { "Authorization": "Bearer your-token-here" }
+    }
+  }
+}
+```
+
+> The `headers` field is supported by Streamable-HTTP-capable clients. On
+> stdio-only clients (e.g. via `mcp-remote`), pass the header the way that tool
+> documents it instead.
+
+> The static token is a lightweight gate suitable for a personal, self-hosted
+> server. For anything internet-exposed, also put it behind TLS / a reverse
+> proxy.
+
 ---
 
 ## 🧰 What it can do
@@ -157,6 +184,7 @@ Everything is configured through environment variables:
 | `ROHLIK_MCP_HOST` | | `0.0.0.0` | HTTP bind host |
 | `ROHLIK_MCP_PORT` | | `8000` | HTTP bind port |
 | `ROHLIK_MCP_PATH` | | `/mcp/` | HTTP endpoint path |
+| `ROHLIK_MCP_AUTH_TOKEN` | | — | Bearer token clients must present; auth is disabled when unset |
 
 ---
 

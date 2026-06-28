@@ -9,15 +9,19 @@ first authenticated call.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastmcp import FastMCP
 from rohlik_api import RohlikAPI, RohlikAPIError
 
 from .config import Config
+
+if TYPE_CHECKING:
+    from fastmcp.server.auth import StaticTokenVerifier
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +89,23 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         await _close_client()
 
 
+def _build_auth() -> StaticTokenVerifier | None:
+    """Build bearer-token auth from ``ROHLIK_MCP_AUTH_TOKEN``, if set.
+
+    When the variable is unset the server runs without authentication
+    (unchanged behaviour). When set, clients must present the token as
+    ``Authorization: Bearer <token>``.
+    """
+    token = os.environ.get("ROHLIK_MCP_AUTH_TOKEN")
+    if not token:
+        return None
+    # Imported lazily so a missing/renamed symbol only breaks startup when auth
+    # is actually configured, not for the default unauthenticated server.
+    from fastmcp.server.auth import StaticTokenVerifier
+
+    return StaticTokenVerifier(tokens={token: {"client_id": "rohlik-mcp"}})
+
+
 mcp = FastMCP(
     "rohlik",
     instructions=(
@@ -93,6 +114,7 @@ mcp = FastMCP(
         "orders and delivery information for the authenticated account."
     ),
     lifespan=_lifespan,
+    auth=_build_auth(),
 )
 
 
