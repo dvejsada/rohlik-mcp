@@ -105,6 +105,11 @@ class TestCartTools:
         result = await server.add_to_cart(123)
         assert result == {"added": False, "product_id": 123}
 
+    async def test_add_to_cart_surfaces_api_error(self, mock_client):
+        mock_client.cart.add_items = AsyncMock(side_effect=APIRequestFailedError("auth failed"))
+        result = await server.add_to_cart(123)
+        assert result == {"error": "auth failed"}
+
     async def test_add_items_to_cart_partial(self, mock_client):
         mock_client.cart.add_items = AsyncMock(return_value=[123])
         result = await server.add_items_to_cart(

@@ -164,7 +164,11 @@ async def add_to_cart(product_id: int, quantity: int = 1) -> ToolResult:
     """
     client = get_client()
     added = await _call(client.cart.add_items([{"product_id": product_id, "quantity": quantity}]))
-    if isinstance(added, list) and product_id in added:
+    if not isinstance(added, list):
+        # _call returned an error payload (or "no data") — surface it unchanged
+        # instead of masking it as the product having failed to add.
+        return added
+    if product_id in added:
         return {"added": True, "product_id": product_id, "quantity": quantity}
     return {"added": False, "product_id": product_id}
 
