@@ -1,0 +1,20 @@
+services:
+  rohlik-mcp:
+    image: georgx22/rohlik-mcp:latest
+    container_name: rohlik-mcp
+    restart: unless-stopped
+    # Credentials and settings are read from .env (see .env.example).
+    env_file: .env
+    # Publish the same port the server binds to (ROHLIK_MCP_PORT, default 8000).
+    ports:
+      - "${ROHLIK_MCP_PORT:-8000}:${ROHLIK_MCP_PORT:-8000}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('ROHLIK_MCP_PORT','8000'))), timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
