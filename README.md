@@ -85,7 +85,7 @@ Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
 
 ## 🧰 What it can do
 
-**25 tools**, grouped by what they touch:
+**28 tools**, grouped by what they touch:
 
 ### 🥑 Products
 | Tool | What it does |
@@ -96,6 +96,8 @@ Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
 | `get_product_ai_summary` | AI-generated product summary |
 | `get_product_detail` | Full product detail |
 | `get_product_categories` | Category breadcrumb for a product |
+| `get_product_cards` | Basic info for several products at once |
+| `get_weekly_sales` | This week's deals ("Akce týdne"), enriched |
 
 ### 🛒 Cart
 | Tool | What it does |
@@ -124,6 +126,7 @@ Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
 | Tool | What it does |
 | ---- | ------------ |
 | `get_delivery_info` | First-delivery information |
+| `get_delivery_addresses` | Saved delivery addresses |
 | `get_next_delivery_slots` | Next available delivery slots |
 | `get_timeslot_reservation` | Your currently reserved slot |
 

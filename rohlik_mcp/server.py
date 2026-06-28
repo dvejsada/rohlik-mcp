@@ -143,6 +143,26 @@ async def get_product_categories(product_id: int) -> ToolResult:
     return await _call(get_client().products.get_categories(product_id))
 
 
+@mcp.tool()
+async def get_product_cards(product_ids: list[int]) -> ToolResult:
+    """Get basic info (name, brand, amount, price and any sale) for several products at once.
+
+    Args:
+        product_ids: The product IDs to look up.
+    """
+    return await _call(get_client().products.get_cards(product_ids))
+
+
+@mcp.tool()
+async def get_weekly_sales(size: int = 30) -> ToolResult:
+    """Get this week's deals ("Akce týdne"), enriched with basic product data.
+
+    Args:
+        size: Maximum number of products to return (default 30).
+    """
+    return await _call(get_client().products.get_week_sales(size=size))
+
+
 # ---------------------------------------------------------------------------
 # Cart
 # ---------------------------------------------------------------------------
@@ -282,6 +302,12 @@ async def get_order_detail(order_id: int) -> ToolResult:
 async def get_delivery_info() -> ToolResult:
     """Get first-delivery information for the account."""
     return await _call(get_client().delivery.get_info())
+
+
+@mcp.tool()
+async def get_delivery_addresses() -> ToolResult:
+    """Get the account's saved delivery addresses."""
+    return await _call(get_client().delivery.get_addresses())
 
 
 @mcp.tool()

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp import Client
-from rohlik_api import APIRequestFailedError, Cart, CartItem, ProductPrice
+from rohlik_api import APIRequestFailedError, Cart, CartItem, ProductCard, ProductPrice
 
 from rohlik_mcp import server
 
@@ -84,6 +84,44 @@ class TestProductTools:
         result = await server.get_product_categories(123)
         assert result == [{"id": 1, "name": "Dairy"}]
         mock_client.products.get_categories.assert_awaited_once_with(123)
+
+    async def test_get_product_cards_serializes_models(self, mock_client):
+        card = ProductCard(
+            id=1,
+            name="Milk",
+            brand="Rohlik",
+            amount="1 l",
+            unit="l",
+            price=27.9,
+            original_price=34.9,
+            unit_price=27.9,
+            currency="CZK",
+            on_sale=True,
+        )
+        mock_client.products.get_cards = AsyncMock(return_value=[card])
+        result = await server.get_product_cards([1, 2])
+        assert result[0]["id"] == 1
+        assert result[0]["on_sale"] is True
+        assert result[0]["price"] == 27.9
+        mock_client.products.get_cards.assert_awaited_once_with([1, 2])
+
+    async def test_get_weekly_sales(self, mock_client):
+        card = ProductCard(
+            id=5,
+            name="Cheese",
+            brand=None,
+            amount="200 g",
+            unit="ks",
+            price=49.9,
+            original_price=59.9,
+            unit_price=249.5,
+            currency="CZK",
+            on_sale=True,
+        )
+        mock_client.products.get_week_sales = AsyncMock(return_value=[card])
+        result = await server.get_weekly_sales(size=10)
+        assert result[0]["name"] == "Cheese"
+        mock_client.products.get_week_sales.assert_awaited_once_with(size=10)
 
 
 class TestCartTools:
@@ -169,6 +207,13 @@ class TestAccountAndDeliveryTools:
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value={"slot": "today"})
         assert await server.get_timeslot_reservation() == {"slot": "today"}
 
+    async def test_get_delivery_addresses(self, mock_client):
+        mock_client.delivery.get_addresses = AsyncMock(
+            return_value={"data": [{"address": {"id": 11723996}}]}
+        )
+        result = await server.get_delivery_addresses()
+        assert result["data"][0]["address"]["id"] == 11723996
+
 
 class TestErrorHandling:
     async def test_api_error_returns_error_dict(self, mock_client):
@@ -196,6 +241,9 @@ class TestServerMetadata:
         assert "get_premium_profile" in names
         assert "get_bags_info" in names
         assert "get_announcements" in names
+        assert "get_product_cards" in names
+        assert "get_weekly_sales" in names
+        assert "get_delivery_addresses" in names
 
     async def test_call_tool_in_memory(self, mock_client):
         """End-to-end: invoke a tool through the FastMCP client."""
