@@ -91,6 +91,18 @@ class TestProductTools:
         assert result == {}
         mock_client.products.get_categories.assert_not_awaited()
 
+    async def test_bulk_deduplicates_ids(self, mock_client):
+        mock_client.products.get_categories = AsyncMock(return_value=[{"id": 1}])
+        result = await server.get_product_categories([7, 7, 7])
+        assert result == {"7": [{"id": 1}]}
+        mock_client.products.get_categories.assert_awaited_once_with(7)
+
+    async def test_get_product_cards_empty_skips_api(self, mock_client):
+        mock_client.products.get_cards = AsyncMock()
+        result = await server.get_product_cards([])
+        assert result == []
+        mock_client.products.get_cards.assert_not_awaited()
+
     async def test_bulk_surfaces_per_item_error(self, mock_client):
         mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
         result = await server.get_shopping_list(["abc"])

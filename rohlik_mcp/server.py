@@ -81,6 +81,11 @@ async def _call(coro: Awaitable[Any]) -> ToolResult:
     return result
 
 
+# Cap on simultaneous in-flight requests per bulk lookup, so a large ID list
+# can't open an unbounded number of connections at once.
+_BULK_CONCURRENCY = 8
+
+
 async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) -> dict[str, Any]:
     """Fetch many items concurrently, returning an ``{id: result}`` map.
 
@@ -92,13 +97,25 @@ async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) 
     ``null`` so callers can tell which IDs came back empty.
 
     Keys are always strings: JSON object keys are strings anyway, so numeric IDs
-    are stringified up front to make the contract explicit and stable.
+    are stringified up front to make the contract explicit and stable. Duplicate
+    IDs are collapsed (a JSON map can't hold duplicates), which also avoids
+    redundant requests, and concurrency is bounded by ``_BULK_CONCURRENCY``.
     """
     if not ids:
         return {}
-    results = await asyncio.gather(*(fetch(item_id) for item_id in ids), return_exceptions=True)
+    # De-duplicate while preserving order.
+    unique_ids = list(dict.fromkeys(ids))
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+
+    async def _bounded(item_id: Any) -> Any:
+        async with semaphore:
+            return await fetch(item_id)
+
+    results = await asyncio.gather(
+        *(_bounded(item_id) for item_id in unique_ids), return_exceptions=True
+    )
     out: dict[str, Any] = {}
-    for item_id, result in zip(ids, results, strict=True):
+    for item_id, result in zip(unique_ids, results, strict=True):
         key = str(item_id)
         if isinstance(result, RohlikAPIError):
             out[key] = {"error": str(result)}
@@ -205,6 +222,8 @@ async def get_product_cards(product_ids: list[int]) -> ToolResult:
     Args:
         product_ids: The product IDs to look up.
     """
+    if not product_ids:
+        return []
     return await _call(get_client().products.get_cards(product_ids))
 
 
