@@ -58,37 +58,31 @@ class TestSerialize:
 
 
 class TestProductTools:
-    async def test_none_result_returns_message(self, mock_client):
-        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
-        result = await server.get_premium_profile()
-        assert isinstance(result, str)
-        assert "No data" in result
-
     async def test_get_product_composition_bulk(self, mock_client):
         comp = ProductComposition(product_id=1, ingredients="milk")
         mock_client.products.get_composition = AsyncMock(side_effect=[comp, None])
         result = await server.get_product_composition([1, 2])
-        assert result[1]["product_id"] == 1
-        assert result[1]["ingredients"] == "milk"
-        assert result[2] is None
+        assert result["1"]["product_id"] == 1
+        assert result["1"]["ingredients"] == "milk"
+        assert result["2"] is None
 
     async def test_get_product_detail_bulk_trims_noise(self, mock_client):
         mock_client.products.get_detail = AsyncMock(
             return_value={"id": 123, "name": "Milk", "images": ["a", "b"], "badges": ["x"]}
         )
         result = await server.get_product_detail([123])
-        assert result == {123: {"id": 123, "name": "Milk"}}
+        assert result == {"123": {"id": 123, "name": "Milk"}}
         mock_client.products.get_detail.assert_awaited_once_with(123)
 
     async def test_get_product_detail_missing_is_null(self, mock_client):
         mock_client.products.get_detail = AsyncMock(return_value=None)
         result = await server.get_product_detail([999])
-        assert result == {999: None}
+        assert result == {"999": None}
 
     async def test_get_product_categories_bulk(self, mock_client):
         mock_client.products.get_categories = AsyncMock(return_value=[{"id": 1, "name": "Dairy"}])
         result = await server.get_product_categories([123])
-        assert result == {123: [{"id": 1, "name": "Dairy"}]}
+        assert result == {"123": [{"id": 1, "name": "Dairy"}]}
         mock_client.products.get_categories.assert_awaited_once_with(123)
 
     async def test_bulk_empty_ids_returns_empty_map(self, mock_client):
@@ -176,6 +170,12 @@ class TestCartTools:
         assert "error" in result
         mock_client.cart.add_items.assert_not_awaited()
 
+    async def test_add_to_cart_empty_skips_api(self, mock_client):
+        mock_client.cart.add_items = AsyncMock()
+        result = await server.add_to_cart([])
+        assert result == {"added": [], "failed": []}
+        mock_client.cart.add_items.assert_not_awaited()
+
     async def test_remove_from_cart_partial(self, mock_client):
         mock_client.cart.delete_item = AsyncMock(side_effect=[None, APIRequestFailedError("boom")])
         result = await server.remove_from_cart(["f1", "f2"])
@@ -187,11 +187,17 @@ class TestOrderTools:
     async def test_get_order_detail_bulk(self, mock_client):
         mock_client.orders.get_detail = AsyncMock(return_value={"id": 555, "state": "DELIVERED"})
         result = await server.get_order_detail([555])
-        assert result == {555: {"id": 555, "state": "DELIVERED"}}
+        assert result == {"555": {"id": 555, "state": "DELIVERED"}}
         mock_client.orders.get_detail.assert_awaited_once_with(555)
 
 
 class TestAccountAndDeliveryTools:
+    async def test_none_result_returns_message(self, mock_client):
+        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
+        result = await server.get_premium_profile()
+        assert isinstance(result, str)
+        assert "No data" in result
+
     async def test_get_premium_profile(self, mock_client):
         mock_client.account.get_premium_profile = AsyncMock(return_value={"active": True})
         assert await server.get_premium_profile() == {"active": True}

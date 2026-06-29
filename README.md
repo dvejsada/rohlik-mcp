@@ -113,7 +113,9 @@ random string; clients must then send it as a bearer token. Use this config
 ## 🧰 What it can do
 
 **26 tools**, grouped by what they touch. Lookups that take an ID accept a
-**list** of IDs and run in one call — fewer round-trips, same result.
+**list** of IDs and run in one call — fewer round-trips, same result. These
+return a map of **ID → result** (the IDs are JSON object keys, so always
+strings, e.g. `"123"`); an ID is `null` when nothing was found for it.
 
 ### 🥑 Products
 | Tool | What it does |

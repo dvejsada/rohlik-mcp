@@ -81,7 +81,7 @@ async def _call(coro: Awaitable[Any]) -> ToolResult:
     return result
 
 
-async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) -> dict[Any, Any]:
+async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) -> dict[str, Any]:
     """Fetch many items concurrently, returning an ``{id: result}`` map.
 
     ``fetch`` is an async callable taking a single ID. The lookups run
@@ -90,18 +90,22 @@ async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) 
     Rohlik API errors become an ``{"error": ...}`` value for that ID rather than
     failing the whole batch; ``None`` results (not found / no data) are kept as
     ``null`` so callers can tell which IDs came back empty.
+
+    Keys are always strings: JSON object keys are strings anyway, so numeric IDs
+    are stringified up front to make the contract explicit and stable.
     """
     if not ids:
         return {}
     results = await asyncio.gather(*(fetch(item_id) for item_id in ids), return_exceptions=True)
-    out: dict[Any, Any] = {}
+    out: dict[str, Any] = {}
     for item_id, result in zip(ids, results, strict=True):
+        key = str(item_id)
         if isinstance(result, RohlikAPIError):
-            out[item_id] = {"error": str(result)}
+            out[key] = {"error": str(result)}
         elif isinstance(result, BaseException):
             raise result
         else:
-            out[item_id] = _serialize(result)
+            out[key] = _serialize(result)
     return out
 
 
@@ -293,6 +297,8 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
 
     Returns the product IDs that were successfully added and any that failed.
     """
+    if not items:
+        return {"added": [], "failed": []}
     try:
         payload = [
             {"product_id": int(item["product_id"]), "quantity": int(item.get("quantity", 1))}
