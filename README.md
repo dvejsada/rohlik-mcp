@@ -112,33 +112,32 @@ random string; clients must then send it as a bearer token. Use this config
 
 ## 🧰 What it can do
 
-**28 tools**, grouped by what they touch:
+**26 tools**, grouped by what they touch. Lookups that take an ID accept a
+**list** of IDs and run in one call — fewer round-trips, same result.
 
 ### 🥑 Products
 | Tool | What it does |
 | ---- | ------------ |
-| `search_products` | Search the catalogue by name |
-| `get_product_price` | Current price and price-per-unit |
-| `get_product_composition` | Nutrition, ingredients and allergens |
-| `get_product_ai_summary` | AI-generated product summary |
-| `get_product_detail` | Full product detail |
-| `get_product_categories` | Category breadcrumb for a product |
-| `get_product_cards` | Basic info for several products at once |
+| `search_products` | Search the catalogue by name (optionally favourites only) |
+| `get_product_cards` | Name, price, sale and stock for several products — the go-to for pricing |
+| `get_product_composition` | Nutrition, ingredients and allergens (one or more products) |
+| `get_product_ai_summary` | AI-generated product summary (one or more products) |
+| `get_product_detail` | Trimmed product detail (one or more products) |
+| `get_product_categories` | Category breadcrumb (one or more products) |
 | `get_weekly_sales` | This week's deals ("Akce týdne"), enriched |
 
 ### 🛒 Cart
 | Tool | What it does |
 | ---- | ------------ |
 | `get_cart` | Current cart contents and total |
-| `add_to_cart` | Add a single product |
-| `add_items_to_cart` | Add several products in one call |
-| `remove_from_cart` | Remove an item |
+| `add_to_cart` | Add one or more products in one call |
+| `remove_from_cart` | Remove one or more items in one call |
 
 ### 👩‍🍳 Recipes (Rohlík Chef)
 | Tool | What it does |
 | ---- | ------------ |
 | `search_recipes` | Search recipes by name |
-| `get_recipe_detail` | Full recipe with ingredients and directions |
+| `get_recipe_detail` | Full recipe(s) with ingredients and directions |
 | `get_ingredient_products` | Shoppable products for a recipe's ingredients |
 
 ### 📦 Orders
@@ -147,7 +146,7 @@ random string; clients must then send it as a bearer token. Use this config
 | `get_next_order` | Your next upcoming order |
 | `get_last_order` | Your most recent delivered order |
 | `get_delivered_orders` | Your order history |
-| `get_order_detail` | Full detail of a single order by ID |
+| `get_order_detail` | Full detail of one or more orders by ID |
 
 ### 🚚 Delivery
 | Tool | What it does |
@@ -160,14 +159,14 @@ random string; clients must then send it as a bearer token. Use this config
 ### 👤 Account
 | Tool | What it does |
 | ---- | ------------ |
-| `get_shopping_list` | A saved shopping list by ID |
-| `get_account_overview` | One-call snapshot: cart, orders, delivery & more |
+| `get_shopping_list` | One or more saved shopping lists by ID |
+| `get_account_overview` | Trimmed one-call snapshot: cart, orders, delivery & more |
 | `get_premium_profile` | Premium (membership) profile |
 | `get_bags_info` | Reusable shopping bags |
 | `get_announcements` | Account announcements |
 
-> ⚠️ **`add_to_cart`, `add_items_to_cart` and `remove_from_cart` change your
-> real Rohlik cart.** Everything else is read-only.
+> ⚠️ **`add_to_cart` and `remove_from_cart` change your real Rohlik cart.**
+> Everything else is read-only.
 
 ---
 

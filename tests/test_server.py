@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastmcp import Client
-from rohlik_api import APIRequestFailedError, Cart, CartItem, ProductCard, ProductPrice
+from rohlik_api import (
+    APIRequestFailedError,
+    Cart,
+    CartItem,
+    ProductCard,
+    ProductComposition,
+)
 
 from rohlik_mcp import server
 
@@ -52,38 +58,49 @@ class TestSerialize:
 
 
 class TestProductTools:
-    async def test_get_product_price_serializes_model(self, mock_client):
-        mock_client.products.get_price = AsyncMock(
-            return_value=ProductPrice(
-                product_id=123, price=40.9, currency="CZK", price_per_unit=340.83
-            )
-        )
-        result = await server.get_product_price(123)
-        assert result == {
-            "product_id": 123,
-            "price": 40.9,
-            "currency": "CZK",
-            "price_per_unit": 340.83,
-            "sales": [],
-        }
-
     async def test_none_result_returns_message(self, mock_client):
-        mock_client.products.get_price = AsyncMock(return_value=None)
-        result = await server.get_product_price(123)
+        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
+        result = await server.get_premium_profile()
         assert isinstance(result, str)
         assert "No data" in result
 
-    async def test_get_product_detail(self, mock_client):
-        mock_client.products.get_detail = AsyncMock(return_value={"id": 123, "name": "Milk"})
-        result = await server.get_product_detail(123)
-        assert result == {"id": 123, "name": "Milk"}
+    async def test_get_product_composition_bulk(self, mock_client):
+        comp = ProductComposition(product_id=1, ingredients="milk")
+        mock_client.products.get_composition = AsyncMock(side_effect=[comp, None])
+        result = await server.get_product_composition([1, 2])
+        assert result[1]["product_id"] == 1
+        assert result[1]["ingredients"] == "milk"
+        assert result[2] is None
+
+    async def test_get_product_detail_bulk_trims_noise(self, mock_client):
+        mock_client.products.get_detail = AsyncMock(
+            return_value={"id": 123, "name": "Milk", "images": ["a", "b"], "badges": ["x"]}
+        )
+        result = await server.get_product_detail([123])
+        assert result == {123: {"id": 123, "name": "Milk"}}
         mock_client.products.get_detail.assert_awaited_once_with(123)
 
-    async def test_get_product_categories(self, mock_client):
+    async def test_get_product_detail_missing_is_null(self, mock_client):
+        mock_client.products.get_detail = AsyncMock(return_value=None)
+        result = await server.get_product_detail([999])
+        assert result == {999: None}
+
+    async def test_get_product_categories_bulk(self, mock_client):
         mock_client.products.get_categories = AsyncMock(return_value=[{"id": 1, "name": "Dairy"}])
-        result = await server.get_product_categories(123)
-        assert result == [{"id": 1, "name": "Dairy"}]
+        result = await server.get_product_categories([123])
+        assert result == {123: [{"id": 1, "name": "Dairy"}]}
         mock_client.products.get_categories.assert_awaited_once_with(123)
+
+    async def test_bulk_empty_ids_returns_empty_map(self, mock_client):
+        mock_client.products.get_categories = AsyncMock()
+        result = await server.get_product_categories([])
+        assert result == {}
+        mock_client.products.get_categories.assert_not_awaited()
+
+    async def test_bulk_surfaces_per_item_error(self, mock_client):
+        mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
+        result = await server.get_shopping_list(["abc"])
+        assert result == {"abc": {"error": "boom"}}
 
     async def test_get_product_cards_serializes_models(self, mock_client):
         card = ProductCard(
@@ -133,60 +150,44 @@ class TestCartTools:
         assert result["total_price"] == 99.9
         assert result["total_items"] == 1
 
-    async def test_add_to_cart_success(self, mock_client):
+    async def test_add_to_cart_single(self, mock_client):
         mock_client.cart.add_items = AsyncMock(return_value=[123])
-        result = await server.add_to_cart(123, quantity=2)
-        assert result == {"added": True, "product_id": 123, "quantity": 2}
+        result = await server.add_to_cart([{"product_id": 123, "quantity": 2}])
+        assert result == {"added": [123], "failed": []}
+        mock_client.cart.add_items.assert_awaited_once_with([{"product_id": 123, "quantity": 2}])
 
-    async def test_add_to_cart_failure(self, mock_client):
-        mock_client.cart.add_items = AsyncMock(return_value=[])
-        result = await server.add_to_cart(123)
-        assert result == {"added": False, "product_id": 123}
-
-    async def test_add_to_cart_surfaces_api_error(self, mock_client):
-        mock_client.cart.add_items = AsyncMock(side_effect=APIRequestFailedError("auth failed"))
-        result = await server.add_to_cart(123)
-        assert result == {"error": "auth failed"}
-
-    async def test_add_items_to_cart_partial(self, mock_client):
+    async def test_add_to_cart_partial(self, mock_client):
         mock_client.cart.add_items = AsyncMock(return_value=[123])
-        result = await server.add_items_to_cart(
-            [{"product_id": 123, "quantity": 2}, {"product_id": 456}]
-        )
+        result = await server.add_to_cart([{"product_id": 123, "quantity": 2}, {"product_id": 456}])
         assert result == {"added": [123], "failed": [456]}
         mock_client.cart.add_items.assert_awaited_once_with(
             [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
         )
 
-    async def test_add_items_to_cart_surfaces_api_error(self, mock_client):
+    async def test_add_to_cart_surfaces_api_error(self, mock_client):
         mock_client.cart.add_items = AsyncMock(side_effect=APIRequestFailedError("auth failed"))
-        result = await server.add_items_to_cart([{"product_id": 123}])
+        result = await server.add_to_cart([{"product_id": 123}])
         assert result == {"error": "auth failed"}
 
-    async def test_add_items_to_cart_malformed_input(self, mock_client):
+    async def test_add_to_cart_malformed_input(self, mock_client):
         mock_client.cart.add_items = AsyncMock()
-        result = await server.add_items_to_cart([{"quantity": 2}])
+        result = await server.add_to_cart([{"quantity": 2}])
         assert isinstance(result, dict)
         assert "error" in result
         mock_client.cart.add_items.assert_not_awaited()
 
-    async def test_remove_from_cart(self, mock_client):
-        mock_client.cart.delete_item = AsyncMock()
-        result = await server.remove_from_cart("f1")
-        assert result == {"removed": True, "cart_item_id": "f1"}
-        mock_client.cart.delete_item.assert_awaited_once_with("f1")
-
-    async def test_remove_from_cart_error(self, mock_client):
-        mock_client.cart.delete_item = AsyncMock(side_effect=APIRequestFailedError("boom"))
-        result = await server.remove_from_cart("f1")
-        assert result == {"error": "boom"}
+    async def test_remove_from_cart_partial(self, mock_client):
+        mock_client.cart.delete_item = AsyncMock(side_effect=[None, APIRequestFailedError("boom")])
+        result = await server.remove_from_cart(["f1", "f2"])
+        assert result == {"removed": ["f1"], "failed": ["f2"]}
+        assert mock_client.cart.delete_item.await_count == 2
 
 
 class TestOrderTools:
-    async def test_get_order_detail(self, mock_client):
+    async def test_get_order_detail_bulk(self, mock_client):
         mock_client.orders.get_detail = AsyncMock(return_value={"id": 555, "state": "DELIVERED"})
-        result = await server.get_order_detail(555)
-        assert result == {"id": 555, "state": "DELIVERED"}
+        result = await server.get_order_detail([555])
+        assert result == {555: {"id": 555, "state": "DELIVERED"}}
         mock_client.orders.get_detail.assert_awaited_once_with(555)
 
 
@@ -206,6 +207,41 @@ class TestAccountAndDeliveryTools:
     async def test_get_timeslot_reservation(self, mock_client):
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value={"slot": "today"})
         assert await server.get_timeslot_reservation() == {"slot": "today"}
+
+    async def test_get_account_overview_composes_and_omits_login(self, mock_client):
+        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
+        mock_client.orders.get_next = AsyncMock(return_value={"n": 1})
+        mock_client.orders.get_last = AsyncMock(return_value=None)
+        mock_client.cart.get_content = AsyncMock(
+            return_value=Cart(total_price=5.0, total_items=1, can_make_order=True, products=[])
+        )
+        mock_client.account.get_premium_profile = AsyncMock(return_value={"active": True})
+        mock_client.account.get_bags_info = AsyncMock(return_value={"count": 0})
+        mock_client.account.get_announcements = AsyncMock(return_value=[])
+        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
+        mock_client.delivery.get_next_slots = AsyncMock(return_value={"slot": "today"})
+
+        result = await server.get_account_overview()
+
+        assert "login" not in result
+        assert "delivered_orders" not in result
+        assert result["cart"]["total_price"] == 5.0
+        assert result["premium_profile"] == {"active": True}
+        assert result["last_order"] is None
+
+    async def test_get_account_overview_surfaces_section_error(self, mock_client):
+        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
+        mock_client.orders.get_next = AsyncMock(return_value=None)
+        mock_client.orders.get_last = AsyncMock(return_value=None)
+        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("nope"))
+        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
+        mock_client.account.get_bags_info = AsyncMock(return_value=None)
+        mock_client.account.get_announcements = AsyncMock(return_value=None)
+        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
+        mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
+
+        result = await server.get_account_overview()
+        assert result["cart"] == {"error": "nope"}
 
     async def test_get_delivery_addresses(self, mock_client):
         mock_client.delivery.get_addresses = AsyncMock(
@@ -253,8 +289,10 @@ class TestServerMetadata:
         # newly added tools
         assert "get_product_detail" in names
         assert "get_product_categories" in names
-        assert "add_items_to_cart" in names
         assert "get_order_detail" in names
+        # consolidated/removed tools
+        assert "add_items_to_cart" not in names
+        assert "get_product_price" not in names
         assert "get_timeslot_reservation" in names
         assert "get_premium_profile" in names
         assert "get_bags_info" in names
