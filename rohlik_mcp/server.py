@@ -8,9 +8,10 @@ first authenticated call.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING, Any
@@ -80,6 +81,81 @@ async def _call(coro: Awaitable[Any]) -> ToolResult:
     return result
 
 
+# Cap on simultaneous in-flight requests per bulk lookup, so a large ID list
+# can't open an unbounded number of connections at once.
+_BULK_CONCURRENCY = 8
+
+
+async def _gather_by_id(ids: list[Any], fetch: Callable[[Any], Awaitable[Any]]) -> dict[str, Any]:
+    """Fetch many items concurrently, returning an ``{id: result}`` map.
+
+    ``fetch`` is an async callable taking a single ID. The lookups run
+    concurrently — LLM round-trips are the expensive resource, individual API
+    calls are not — so a batch costs one tool call regardless of size. Per-item
+    Rohlik API errors become an ``{"error": ...}`` value for that ID rather than
+    failing the whole batch; ``None`` results (not found / no data) are kept as
+    ``null`` so callers can tell which IDs came back empty.
+
+    Keys are always strings: JSON object keys are strings anyway, so numeric IDs
+    are stringified up front to make the contract explicit and stable. Duplicate
+    IDs are collapsed (a JSON map can't hold duplicates), which also avoids
+    redundant requests, and concurrency is bounded by ``_BULK_CONCURRENCY``.
+    """
+    if not ids:
+        return {}
+    # De-duplicate while preserving order.
+    unique_ids = list(dict.fromkeys(ids))
+    semaphore = asyncio.Semaphore(_BULK_CONCURRENCY)
+
+    async def _bounded(item_id: Any) -> Any:
+        async with semaphore:
+            return await fetch(item_id)
+
+    results = await asyncio.gather(
+        *(_bounded(item_id) for item_id in unique_ids), return_exceptions=True
+    )
+    out: dict[str, Any] = {}
+    for item_id, result in zip(unique_ids, results, strict=True):
+        key = str(item_id)
+        if isinstance(result, RohlikAPIError):
+            out[key] = {"error": str(result)}
+        elif isinstance(result, BaseException):
+            raise result
+        else:
+            out[key] = _serialize(result)
+    return out
+
+
+# Best-effort denylist of bulky, low-signal keys in the raw product-detail
+# payload. Trimming by removal (rather than whitelisting) keeps every useful
+# field even if the API shape changes; tune this list against a live payload.
+_DETAIL_DROP_KEYS = frozenset(
+    {
+        "images",
+        "image",
+        "imgPath",
+        "imagePath",
+        "gallery",
+        "badges",
+        "htmlDescription",
+        "descriptionHtml",
+        "marketingText",
+        "banner",
+        "banners",
+        "relatedProducts",
+        "similarProducts",
+        "alternatives",
+        "recommendations",
+        "breadcrumbs",
+    }
+)
+
+
+def _trim_product_detail(raw: dict[str, Any]) -> dict[str, Any]:
+    """Drop bulky display-only keys from a raw product-detail payload."""
+    return {key: value for key, value in raw.items() if key not in _DETAIL_DROP_KEYS}
+
+
 @asynccontextmanager
 async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     """Ensure the shared client is closed when the server stops."""
@@ -136,43 +212,76 @@ async def search_products(query: str, limit: int = 10, favourite: bool = False) 
 
 
 @mcp.tool()
-async def get_product_price(product_id: int) -> ToolResult:
-    """Get the current price and price-per-unit for a product."""
-    return await _call(get_client().products.get_price(product_id))
-
-
-@mcp.tool()
-async def get_product_composition(product_id: int) -> ToolResult:
-    """Get nutritional values, ingredients and allergens for a product."""
-    return await _call(get_client().products.get_composition(product_id))
-
-
-@mcp.tool()
-async def get_product_ai_summary(product_id: int) -> ToolResult:
-    """Get the AI-generated summary for a product."""
-    return await _call(get_client().products.get_ai_summary(product_id))
-
-
-@mcp.tool()
-async def get_product_detail(product_id: int) -> ToolResult:
-    """Get the full detail for a product (name, images, description, badges, etc.)."""
-    return await _call(get_client().products.get_detail(product_id))
-
-
-@mcp.tool()
-async def get_product_categories(product_id: int) -> ToolResult:
-    """Get the category breadcrumb a product belongs to."""
-    return await _call(get_client().products.get_categories(product_id))
-
-
-@mcp.tool()
 async def get_product_cards(product_ids: list[int]) -> ToolResult:
-    """Get basic info (name, brand, amount, price and any sale) for several products at once.
+    """Get basic info for several products at once: name, brand, amount, unit, price
+    (incl. any sale and the original price), price-per-unit and stock status.
+
+    This is the primary tool for product pricing and availability — prefer it
+    over the detailed lookups below when you only need names, prices or stock.
 
     Args:
         product_ids: The product IDs to look up.
     """
+    if not product_ids:
+        return []
     return await _call(get_client().products.get_cards(product_ids))
+
+
+@mcp.tool()
+async def get_product_composition(product_ids: list[int]) -> ToolResult:
+    """Get nutritional values, ingredients and allergens for one or more products.
+
+    Args:
+        product_ids: The product IDs to look up.
+
+    Returns a map of product ID to its composition (``null`` when unavailable).
+    """
+    return await _gather_by_id(product_ids, get_client().products.get_composition)
+
+
+@mcp.tool()
+async def get_product_ai_summary(product_ids: list[int]) -> ToolResult:
+    """Get the AI-generated summary for one or more products.
+
+    Args:
+        product_ids: The product IDs to look up.
+
+    Returns a map of product ID to its AI summary (``null`` when unavailable).
+    """
+    return await _gather_by_id(product_ids, get_client().products.get_ai_summary)
+
+
+@mcp.tool()
+async def get_product_detail(product_ids: list[int]) -> ToolResult:
+    """Get the detail (name, description, attributes, etc.) for one or more products.
+
+    Bulky display-only fields (images, badges, marketing blocks) are stripped to
+    keep the response compact. Use ``get_product_cards`` for price/stock only.
+
+    Args:
+        product_ids: The product IDs to look up.
+
+    Returns a map of product ID to its (trimmed) detail (``null`` when unavailable).
+    """
+    products = get_client().products
+
+    async def _fetch(product_id: int) -> Any:
+        raw = await products.get_detail(product_id)
+        return _trim_product_detail(raw) if isinstance(raw, dict) else raw
+
+    return await _gather_by_id(product_ids, _fetch)
+
+
+@mcp.tool()
+async def get_product_categories(product_ids: list[int]) -> ToolResult:
+    """Get the category breadcrumb for one or more products.
+
+    Args:
+        product_ids: The product IDs to look up.
+
+    Returns a map of product ID to its category hierarchy (``null`` when unavailable).
+    """
+    return await _gather_by_id(product_ids, get_client().products.get_categories)
 
 
 @mcp.tool()
@@ -197,34 +306,18 @@ async def get_cart() -> ToolResult:
 
 
 @mcp.tool()
-async def add_to_cart(product_id: int, quantity: int = 1) -> ToolResult:
-    """Add a product to the shopping cart.
-
-    Args:
-        product_id: The ID of the product to add.
-        quantity: How many units to add (default 1).
-    """
-    client = get_client()
-    added = await _call(client.cart.add_items([{"product_id": product_id, "quantity": quantity}]))
-    if not isinstance(added, list):
-        # _call returned an error payload (or "no data") — surface it unchanged
-        # instead of masking it as the product having failed to add.
-        return added
-    if product_id in added:
-        return {"added": True, "product_id": product_id, "quantity": quantity}
-    return {"added": False, "product_id": product_id}
-
-
-@mcp.tool()
-async def add_items_to_cart(items: list[dict[str, int]]) -> ToolResult:
-    """Add several products to the cart in one call.
+async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
+    """Add one or more products to the cart in a single call.
 
     Args:
         items: A list of ``{"product_id": <int>, "quantity": <int>}`` entries.
-            ``quantity`` defaults to 1 when omitted.
+            ``quantity`` defaults to 1 when omitted. Pass a single-entry list to
+            add just one product.
 
     Returns the product IDs that were successfully added and any that failed.
     """
+    if not items:
+        return {"added": [], "failed": []}
     try:
         payload = [
             {"product_id": int(item["product_id"]), "quantity": int(item.get("quantity", 1))}
@@ -248,16 +341,28 @@ async def add_items_to_cart(items: list[dict[str, int]]) -> ToolResult:
 
 
 @mcp.tool()
-async def remove_from_cart(cart_item_id: str) -> ToolResult:
-    """Remove an item from the cart using its cart_item_id (orderFieldId).
+async def remove_from_cart(cart_item_ids: list[str]) -> ToolResult:
+    """Remove one or more items from the cart using their cart_item_id (orderFieldId).
 
-    Use ``get_cart`` first to find the ``cart_item_id`` of the product.
+    Use ``get_cart`` first to find each ``cart_item_id``. Pass a single-entry
+    list to remove just one item.
+
+    Args:
+        cart_item_ids: The cart-line IDs (``orderFieldId``) to remove.
+
+    Returns the IDs that were removed and any that failed.
     """
-    try:
-        await get_client().cart.delete_item(cart_item_id)
-    except RohlikAPIError as err:
-        return {"error": str(err)}
-    return {"removed": True, "cart_item_id": cart_item_id}
+    client = get_client()
+    removed: list[str] = []
+    failed: list[str] = []
+    # Removals mutate the cart, so run them sequentially for predictable results.
+    for cart_item_id in cart_item_ids:
+        try:
+            await client.cart.delete_item(cart_item_id)
+            removed.append(cart_item_id)
+        except RohlikAPIError:
+            failed.append(cart_item_id)
+    return {"removed": removed, "failed": failed}
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +377,15 @@ async def search_recipes(query: str, limit: int = 10, offset: int = 0) -> ToolRe
 
 
 @mcp.tool()
-async def get_recipe_detail(recipe_id: int) -> ToolResult:
-    """Get full recipe details, including ingredients and directions."""
-    return await _call(get_client().recipes.get_detail(recipe_id))
+async def get_recipe_detail(recipe_ids: list[int]) -> ToolResult:
+    """Get full details (ingredients and directions) for one or more recipes.
+
+    Args:
+        recipe_ids: The recipe IDs to look up.
+
+    Returns a map of recipe ID to its detail (``null`` when unavailable).
+    """
+    return await _gather_by_id(recipe_ids, get_client().recipes.get_detail)
 
 
 @mcp.tool()
@@ -311,13 +422,18 @@ async def get_delivered_orders(limit: int = 10, offset: int = 0) -> ToolResult:
 
 
 @mcp.tool()
-async def get_order_detail(order_id: int) -> ToolResult:
-    """Get the full detail of a single order, including its line items.
+async def get_order_detail(order_ids: list[int]) -> ToolResult:
+    """Get the full detail (including line items) of one or more orders.
 
     Use ``get_next_order``, ``get_last_order`` or ``get_delivered_orders`` to
-    find the ``order_id``.
+    find the ``order_id``s.
+
+    Args:
+        order_ids: The order IDs to look up.
+
+    Returns a map of order ID to its detail (``null`` when unavailable).
     """
-    return await _call(get_client().orders.get_detail(order_id))
+    return await _gather_by_id(order_ids, get_client().orders.get_detail)
 
 
 @mcp.tool()
@@ -350,20 +466,50 @@ async def get_timeslot_reservation() -> ToolResult:
 
 
 @mcp.tool()
-async def get_shopping_list(shopping_list_id: str) -> ToolResult:
-    """Get a saved shopping list by its ID."""
-    return await _call(get_client().account.get_shopping_list(shopping_list_id))
+async def get_shopping_list(shopping_list_ids: list[str]) -> ToolResult:
+    """Get one or more saved shopping lists by their IDs.
+
+    Args:
+        shopping_list_ids: The shopping-list IDs to look up.
+
+    Returns a map of shopping-list ID to its contents (``null`` when unavailable).
+    """
+    return await _gather_by_id(shopping_list_ids, get_client().account.get_shopping_list)
 
 
 @mcp.tool()
 async def get_account_overview() -> ToolResult:
-    """Get an aggregated snapshot of the account.
+    """Get a trimmed one-call snapshot of the account.
 
-    Includes delivery info, upcoming and recent orders, cart contents, premium
-    profile, announcements and delivery slots in a single call. Prefer the more
+    Combines delivery info, the next and last orders, cart contents, premium
+    profile, reusable-bags info, announcements, the reserved timeslot and the
+    next available delivery slot in a single call. The full delivered-order
+    history is excluded — use ``get_delivered_orders`` for that. Prefer the
     specific tools when only one piece of information is needed.
     """
-    return await _call(get_client().get_data())
+    client = get_client()
+    sections: list[tuple[str, Awaitable[Any]]] = [
+        ("delivery", client.delivery.get_info()),
+        ("next_order", client.orders.get_next()),
+        ("last_order", client.orders.get_last()),
+        ("cart", client.cart.get_content()),
+        ("premium_profile", client.account.get_premium_profile()),
+        ("bags", client.account.get_bags_info()),
+        ("announcements", client.account.get_announcements()),
+        ("timeslot", client.delivery.get_timeslot_reservation()),
+        ("next_delivery_slot", client.delivery.get_next_slots()),
+    ]
+    names = [name for name, _ in sections]
+    results = await asyncio.gather(*(coro for _, coro in sections), return_exceptions=True)
+    out: dict[str, Any] = {}
+    for name, result in zip(names, results, strict=True):
+        if isinstance(result, RohlikAPIError):
+            out[name] = {"error": str(result)}
+        elif isinstance(result, BaseException):
+            raise result
+        else:
+            out[name] = _serialize(result)
+    return out
 
 
 @mcp.tool()
