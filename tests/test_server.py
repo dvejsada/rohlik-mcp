@@ -103,10 +103,10 @@ class TestProductTools:
         assert result == []
         mock_client.products.get_cards.assert_not_awaited()
 
-    async def test_bulk_surfaces_per_item_error(self, mock_client):
-        mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
-        result = await server.get_shopping_list(["abc"])
-        assert result == {"abc": {"error": "boom"}}
+    async def test_bulk_reraises_unexpected_error(self, mock_client):
+        mock_client.products.get_categories = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError, match="boom"):
+            await server.get_product_categories([1])
 
     async def test_get_product_cards_serializes_models(self, mock_client):
         card = ProductCard(
@@ -247,6 +247,11 @@ class TestAccountAndDeliveryTools:
         assert result["premium_profile"] == {"active": True}
         assert result["last_order"] is None
 
+    async def test_get_shopping_list_bulk_surfaces_per_item_error(self, mock_client):
+        mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
+        result = await server.get_shopping_list(["abc"])
+        assert result == {"abc": {"error": "boom"}}
+
     async def test_get_account_overview_surfaces_section_error(self, mock_client):
         mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
         mock_client.orders.get_next = AsyncMock(return_value=None)
@@ -260,6 +265,20 @@ class TestAccountAndDeliveryTools:
 
         result = await server.get_account_overview()
         assert result["cart"] == {"error": "nope"}
+
+    async def test_get_account_overview_reraises_unexpected_error(self, mock_client):
+        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
+        mock_client.orders.get_next = AsyncMock(return_value=None)
+        mock_client.orders.get_last = AsyncMock(return_value=None)
+        mock_client.cart.get_content = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
+        mock_client.account.get_bags_info = AsyncMock(return_value=None)
+        mock_client.account.get_announcements = AsyncMock(return_value=None)
+        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
+        mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await server.get_account_overview()
 
     async def test_get_delivery_addresses(self, mock_client):
         mock_client.delivery.get_addresses = AsyncMock(
