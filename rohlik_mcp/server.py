@@ -460,6 +460,14 @@ async def get_timeslot_reservation() -> ToolResult:
     return await _call(get_client().delivery.get_timeslot_reservation())
 
 
+@mcp.tool()
+async def get_delivery_announcements() -> ToolResult:
+    """Get delivery announcements, including the current delivery-time ETA
+    for an upcoming order (the ETA shifts often, so fetch fresh when asked
+    about when an order will arrive)."""
+    return await _call(get_client().delivery.get_announcements())
+
+
 # ---------------------------------------------------------------------------
 # Account
 # ---------------------------------------------------------------------------

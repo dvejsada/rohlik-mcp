@@ -226,6 +226,13 @@ class TestAccountAndDeliveryTools:
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value={"slot": "today"})
         assert await server.get_timeslot_reservation() == {"slot": "today"}
 
+    async def test_get_delivery_announcements(self, mock_client):
+        mock_client.delivery.get_announcements = AsyncMock(
+            return_value={"data": {"announcements": [{"id": 1, "content": "at 17:23"}]}}
+        )
+        result = await server.get_delivery_announcements()
+        assert result["data"]["announcements"][0]["id"] == 1
+
     async def test_get_account_overview_composes_and_omits_login(self, mock_client):
         mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
         mock_client.orders.get_next = AsyncMock(return_value={"n": 1})
@@ -337,6 +344,7 @@ class TestServerMetadata:
         assert "get_product_cards" in names
         assert "get_weekly_sales" in names
         assert "get_delivery_addresses" in names
+        assert "get_delivery_announcements" in names
 
     async def test_call_tool_in_memory(self, mock_client):
         """End-to-end: invoke a tool through the FastMCP client."""
