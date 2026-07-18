@@ -243,6 +243,9 @@ class TestAccountAndDeliveryTools:
         mock_client.account.get_premium_profile = AsyncMock(return_value={"active": True})
         mock_client.account.get_bags_info = AsyncMock(return_value={"count": 0})
         mock_client.account.get_announcements = AsyncMock(return_value=[])
+        mock_client.delivery.get_announcements = AsyncMock(
+            return_value={"data": {"announcements": [{"id": 1}]}}
+        )
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
         mock_client.delivery.get_next_slots = AsyncMock(return_value={"slot": "today"})
 
@@ -253,6 +256,7 @@ class TestAccountAndDeliveryTools:
         assert result["cart"]["total_price"] == 5.0
         assert result["premium_profile"] == {"active": True}
         assert result["last_order"] is None
+        assert result["delivery_announcements"]["data"]["announcements"][0]["id"] == 1
 
     async def test_get_shopping_list_bulk_surfaces_per_item_error(self, mock_client):
         mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
@@ -267,6 +271,7 @@ class TestAccountAndDeliveryTools:
         mock_client.account.get_premium_profile = AsyncMock(return_value=None)
         mock_client.account.get_bags_info = AsyncMock(return_value=None)
         mock_client.account.get_announcements = AsyncMock(return_value=None)
+        mock_client.delivery.get_announcements = AsyncMock(return_value=None)
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
         mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
 
@@ -281,6 +286,7 @@ class TestAccountAndDeliveryTools:
         mock_client.account.get_premium_profile = AsyncMock(return_value=None)
         mock_client.account.get_bags_info = AsyncMock(return_value=None)
         mock_client.account.get_announcements = AsyncMock(return_value=None)
+        mock_client.delivery.get_announcements = AsyncMock(return_value=None)
         mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
         mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
 
