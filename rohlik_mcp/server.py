@@ -460,6 +460,14 @@ async def get_timeslot_reservation() -> ToolResult:
     return await _call(get_client().delivery.get_timeslot_reservation())
 
 
+@mcp.tool()
+async def get_delivery_announcements() -> ToolResult:
+    """Get delivery announcements, including the current delivery-time ETA
+    for an upcoming order (the ETA shifts often, so fetch fresh when asked
+    about when an order will arrive)."""
+    return await _call(get_client().delivery.get_announcements())
+
+
 # ---------------------------------------------------------------------------
 # Account
 # ---------------------------------------------------------------------------
@@ -482,7 +490,8 @@ async def get_account_overview() -> ToolResult:
     """Get a trimmed one-call snapshot of the account.
 
     Combines delivery info, the next and last orders, cart contents, premium
-    profile, reusable-bags info, announcements, the reserved timeslot and the
+    profile, reusable-bags info, announcements (account and delivery, the
+    latter carrying the delivery-time ETA), the reserved timeslot and the
     next available delivery slot in a single call. The full delivered-order
     history is excluded — use ``get_delivered_orders`` for that. Prefer the
     specific tools when only one piece of information is needed.
@@ -496,6 +505,7 @@ async def get_account_overview() -> ToolResult:
         ("premium_profile", client.account.get_premium_profile()),
         ("bags", client.account.get_bags_info()),
         ("announcements", client.account.get_announcements()),
+        ("delivery_announcements", client.delivery.get_announcements()),
         ("timeslot", client.delivery.get_timeslot_reservation()),
         ("next_delivery_slot", client.delivery.get_next_slots()),
     ]

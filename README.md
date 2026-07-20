@@ -158,6 +158,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | `get_delivery_addresses` | Saved delivery addresses |
 | `get_next_delivery_slots` | Next available delivery slots |
 | `get_timeslot_reservation` | Your currently reserved slot |
+| `get_delivery_announcements` | Delivery announcements incl. the live delivery-time ETA |
 
 ### 👤 Account
 | Tool | What it does |
