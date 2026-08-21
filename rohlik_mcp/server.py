@@ -47,7 +47,11 @@ _MISSING_CREDENTIALS_MESSAGE = (
 )
 
 
-@dataclass(slots=True)
+# ``eq=False`` so ``==`` is identity. Entries are only ever compared to find a
+# particular one (``entry not in leased``, ``_clients.get(key) is entry``), and
+# a generated field-by-field ``__eq__`` would answer a question nobody is
+# asking - one that a later field change could silently answer differently.
+@dataclass(slots=True, eq=False)
 class _AccountClient:
     """A cached, per-account API client and its bookkeeping."""
 
