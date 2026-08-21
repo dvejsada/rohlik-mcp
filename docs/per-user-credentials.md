@@ -150,15 +150,35 @@ Keeping the fallback available matters for stdio/Claude Desktop use, where
 
 ### Security
 
-* The password rides in a header on **every** request. TLS is no longer optional:
-  document a reverse proxy / HTTPS URL as a requirement for per-user mode.
-* Never log resolved headers. `rohlik_api.helpers.mask_data` exists for the login
-  response; there is no equivalent guard on request headers.
-* `ROHLIK_MCP_AUTH_TOKEN` stays useful as a "who may reach this endpoint at all"
-  gate and composes fine — LibreChat can send a static bearer from `${ENV}` *and*
-  per-user `X-Rohlik-*` from `customUserVars` in the same `headers:` block.
-* Rohlik sees N logins from one IP instead of one. TTL-based eviction (rather
-  than per-call logout) keeps that rate low.
+Deployment context: **both containers run on one local Docker network** (LibreChat
+→ `http://rohlik-mcp:8000/mcp/`), which changes the weighting here a lot.
+
+* **TLS is not required.** The password rides in a header on every request, but
+  that request never leaves the Docker bridge. Terminating TLS between two
+  containers on the same host buys little. This *only* holds while the endpoint
+  stays off the host and off the internet — see the next two points.
+* **Stop publishing the port.** `docker-compose.yml` currently maps
+  `"${ROHLIK_MCP_PORT:-8000}:${ROHLIK_MCP_PORT:-8000}"`. Containers on a shared
+  network reach each other by service name, so the mapping is unnecessary and it
+  is what turns "passwords on a private bridge" into "passwords on
+  `localhost:8000`, reachable by anything on the host". Drop `ports:` (use
+  `expose:` if you want it documented) and put both services on one named
+  network.
+* **Keep `ROHLIK_MCP_AUTH_TOKEN` on.** Every *other* container on that network
+  can also reach the endpoint, and without the bearer gate any of them can call
+  `add_to_cart` with credentials of their choosing. It composes fine with
+  per-user headers — LibreChat sends a static bearer from `${ENV}` alongside the
+  per-user `X-Rohlik-*` from `customUserVars`, in the same `headers:` block.
+* **Never log resolved headers.** `rohlik_api.helpers.mask_data` masks the login
+  response; nothing guards request headers. Bearing in mind `logging.basicConfig(
+  level=logging.INFO)` in `__main__.py`, a stray debug log would put every user's
+  password into `docker logs`.
+* **Drop the credential env vars from the compose file** once per-user mode
+  lands. They would otherwise sit in `.env` as a silent fallback into the owner's
+  account (see above), and `docker inspect` exposes them to anyone on the host.
+* Rohlik sees N logins from **one** egress IP — the host's — instead of one. TTL
+  eviction rather than per-call logout keeps that rate low, which matters more
+  here than it would with users spread across addresses.
 
 ---
 
@@ -173,7 +193,7 @@ runtime, encrypted at rest.
 mcpServers:
   rohlik:
     type: streamable-http
-    url: "https://rohlik-mcp.example.com/mcp/"
+    url: "http://rohlik-mcp:8000/mcp/"   # Docker service name, shared network
     headers:
       X-Rohlik-Username: "{{ROHLIK_USERNAME}}"
       X-Rohlik-Password: "{{ROHLIK_PASSWORD}}"
@@ -217,4 +237,29 @@ Feasible, and a fairly contained change. Suggested order:
 3. Resolve credentials from `X-Rohlik-Username` / `X-Rohlik-Password`, with an
    explicitly opt-in env fallback.
 4. Fix (or upstream a fix for) the unlocked `ensure_logged_in` login stampede.
-5. Docs: LibreChat section, TLS requirement, updated variable table.
+5. Harden the compose deployment: named network shared with LibreChat, no
+   published `ports:`, no credential env vars, `ROHLIK_MCP_AUTH_TOKEN` set.
+6. Docs: LibreChat section and a same-network compose example, updated variable
+   table.
+
+### Sketch: both services on one network
+
+```yaml
+services:
+  rohlik-mcp:
+    image: georgx22/rohlik-mcp:latest
+    restart: unless-stopped
+    environment:
+      ROHLIK_MCP_AUTH_TOKEN: ${ROHLIK_MCP_AUTH_TOKEN}
+      # no ROHLIK_USERNAME / ROHLIK_PASSWORD — credentials arrive per request
+    expose:
+      - "8000"          # reachable as http://rohlik-mcp:8000/ on the network only
+    networks: [librechat]
+
+networks:
+  librechat:
+    external: true      # or define it here and attach LibreChat to it
+```
+
+LibreChat's own compose then needs nothing beyond being attached to the same
+network and the `mcpServers` block above.
