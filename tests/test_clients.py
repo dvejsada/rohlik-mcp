@@ -5,6 +5,7 @@ so no network access or real credentials are involved.
 """
 
 import asyncio
+import contextlib
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -70,6 +71,19 @@ def headers(monkeypatch):
             current[PASSWORD_HEADER] = password
 
     return _set
+
+
+@contextlib.contextmanager
+def lease():
+    """Stand in for ClientLeaseMiddleware around a simulated tool call."""
+    leased: list = []
+    token = server._leased.set(leased)
+    try:
+        yield leased
+    finally:
+        server._leased.reset(token)
+        for entry in leased:
+            entry.in_flight -= 1
 
 
 async def _drain_background_closes():
@@ -201,7 +215,6 @@ class TestGetClient:
 class TestEviction:
     async def test_lru_eviction_closes_the_oldest_idle_client(self, headers, monkeypatch, registry):
         monkeypatch.setenv("ROHLIK_MAX_CLIENTS", "2")
-        monkeypatch.setenv("ROHLIK_TIMEOUT", "0")
         server.get_config.cache_clear()
 
         headers("a@example.com", "secret")
@@ -219,20 +232,58 @@ class TestEviction:
         assert not oldest.closed
         assert [e.client.username for e in registry.values()] == ["a@example.com", "c@example.com"]
 
-    async def test_in_use_clients_are_not_evicted(self, headers, monkeypatch, registry):
-        """Closing a session mid-request would fail the call, so the cap yields."""
+    async def test_a_leased_client_is_never_evicted(self, headers, monkeypatch, registry):
+        """Closing a session mid-call would fail it, so the cap yields instead."""
         monkeypatch.setenv("ROHLIK_MAX_CLIENTS", "1")
-        monkeypatch.setenv("ROHLIK_TIMEOUT", "30")
         server.get_config.cache_clear()
 
-        headers("a@example.com", "secret")
-        busy = await server.get_client()
+        with lease():
+            headers("a@example.com", "secret")
+            busy = await server.get_client()
+            # A second account arrives while the first call is still running.
+            headers("b@example.com", "secret")
+            await server.get_client()
+            await _drain_background_closes()
+
+            assert len(registry) == 2
+            assert not busy.closed
+
+    async def test_a_released_client_becomes_evictable(self, headers, monkeypatch, registry):
+        monkeypatch.setenv("ROHLIK_MAX_CLIENTS", "1")
+        server.get_config.cache_clear()
+
+        with lease():
+            headers("a@example.com", "secret")
+            done = await server.get_client()
+        # The lease is released, so the next arrival may now evict it.
         headers("b@example.com", "secret")
         await server.get_client()
         await _drain_background_closes()
 
-        assert len(registry) == 2
-        assert not busy.closed
+        assert done.closed
+        assert [e.client.username for e in registry.values()] == ["b@example.com"]
+
+    async def test_the_lease_is_released_even_when_the_tool_raises(self, headers, registry):
+        headers("a@example.com", "secret")
+        entry_holder: list = []
+        with contextlib.suppress(RuntimeError):
+            with lease() as leased:
+                await server.get_client()
+                entry_holder.extend(leased)
+                raise RuntimeError("tool blew up")
+
+        assert entry_holder[0].in_flight == 0
+
+    async def test_one_call_leasing_twice_counts_once(self, headers, registry):
+        """Tools may resolve the client more than once; the lease must not leak."""
+        headers("a@example.com", "secret")
+        with lease() as leased:
+            await server.get_client()
+            await server.get_client()
+            assert len(leased) == 1
+            assert leased[0].in_flight == 1
+
+        assert leased[0].in_flight == 0
 
     async def test_reaper_closes_idle_clients_only(self, headers, registry):
         headers("idle@example.com", "secret")
@@ -248,6 +299,19 @@ class TestEviction:
         assert idle.closed
         assert not fresh.closed
         assert [e.client.username for e in registry.values()] == ["fresh@example.com"]
+
+    async def test_reaper_spares_a_leased_client_however_old(self, headers, registry):
+        """A long call looks idle - it is only touched when the client is taken."""
+        with lease():
+            headers("slow@example.com", "secret")
+            slow = await server.get_client()
+            next(iter(registry.values())).last_used -= 10_000
+
+            closed = await server._reap_once(ServerConfig(client_ttl=60.0))
+
+            assert closed == 0
+            assert not slow.closed
+            assert len(registry) == 1
 
     async def test_close_all_clients_empties_the_registry(self, headers, registry):
         headers("a@example.com", "secret")

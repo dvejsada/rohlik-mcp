@@ -17,13 +17,17 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+import mcp.types as mt
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult as FastMCPToolResult
 from rohlik_api import RohlikAPI, RohlikAPIError
 
 from .config import PASSWORD_HEADER, USERNAME_HEADER, Credentials, ServerConfig
@@ -54,6 +58,10 @@ class _AccountClient:
     # per in-flight coroutine on a cold client.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_used: float = field(default_factory=time.monotonic)
+    # Tool calls currently holding this client. Eviction and reaping skip any
+    # entry above zero: closing a client logs its session out, which would fail
+    # the requests still using it.
+    in_flight: int = 0
 
 
 # Cached clients in least-recently-used order, keyed by ``Credentials.cache_key``.
@@ -64,6 +72,34 @@ _reaper_task: asyncio.Task[None] | None = None
 # Strong references to in-flight background closes, so they are not garbage
 # collected mid-await (asyncio only holds a weak reference to running tasks).
 _pending_closes: set[asyncio.Task[None]] = set()
+
+# Clients leased by the tool call being served, released when it finishes (see
+# ``ClientLeaseMiddleware``). A list rather than the entry itself: child tasks
+# inherit a copy of the context, so a write from inside ``asyncio.gather`` would
+# not be visible here, but an append to the shared list is.
+_leased: ContextVar[list[_AccountClient] | None] = ContextVar("_leased", default=None)
+
+
+class ClientLeaseMiddleware(Middleware):
+    """Release the clients a tool call leased once the call finishes.
+
+    ``get_client`` marks the account it hands out as in use; without a matching
+    release, eviction could never tell a busy client from an idle one.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, FastMCPToolResult],
+    ) -> FastMCPToolResult:
+        leased: list[_AccountClient] = []
+        token = _leased.set(leased)
+        try:
+            return await call_next(context)
+        finally:
+            _leased.reset(token)
+            for entry in leased:
+                entry.in_flight -= 1
 
 
 @lru_cache(maxsize=1)
@@ -107,21 +143,16 @@ def _schedule_close(entry: _AccountClient) -> None:
 def _evict_for_room(config: ServerConfig) -> list[_AccountClient]:
     """Drop least-recently-used clients until there is room for one more.
 
-    Only entries untouched for at least the request timeout are eligible: a
-    fresher one may still be mid-request, and closing its session out from under
-    it would fail the call. If every entry is fresh the cache is allowed to
-    exceed its limit rather than break a request in flight.
+    Only clients no tool call is holding are eligible; if every one is busy the
+    cache is allowed to exceed its limit rather than close a session out from
+    under a request in flight.
 
     Called with ``_registry_lock`` held; returns the evicted entries for the
     caller to close outside the lock.
     """
     evicted: list[_AccountClient] = []
-    now = time.monotonic()
     while len(_clients) >= config.max_clients:
-        victim_key = next(
-            (key for key, e in _clients.items() if now - e.last_used >= config.timeout),
-            None,
-        )
+        victim_key = next((key for key, e in _clients.items() if e.in_flight == 0), None)
         if victim_key is None:
             _LOGGER.warning(
                 "Account client cache is full (%d) but every entry is in use; "
@@ -164,6 +195,12 @@ async def get_client() -> RohlikAPI:
         else:
             evicted = []
             _clients.move_to_end(key)
+        # Taken under the lock, so the entry cannot be chosen as an eviction
+        # victim between being handed out here and being marked as in use.
+        leased = _leased.get()
+        if leased is not None and entry not in leased:
+            entry.in_flight += 1
+            leased.append(entry)
 
     for victim in evicted:
         _schedule_close(victim)
@@ -192,7 +229,11 @@ async def _reap_once(config: ServerConfig) -> int:
     """
     now = time.monotonic()
     async with _registry_lock:
-        expired = [key for key, e in _clients.items() if now - e.last_used > config.client_ttl]
+        expired = [
+            key
+            for key, e in _clients.items()
+            if e.in_flight == 0 and now - e.last_used > config.client_ttl
+        ]
         victims = [_clients.pop(key) for key in expired]
     for entry in victims:
         _LOGGER.debug("Closing idle Rohlik client")
@@ -364,6 +405,7 @@ mcp = FastMCP(
     lifespan=_lifespan,
     auth=_build_auth(),
 )
+mcp.add_middleware(ClientLeaseMiddleware())
 
 
 # ---------------------------------------------------------------------------

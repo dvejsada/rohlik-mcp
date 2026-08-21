@@ -19,10 +19,9 @@ DEFAULT_PATH = "/mcp/"
 DEFAULT_CLIENT_TTL = 900.0  # 15 min, matching LibreChat's idle disconnect
 DEFAULT_MAX_CLIENTS = 50
 
-# An idle client must not be reaped while a request is still using it: a client
-# is only touched when a tool acquires it, so a call still in flight looks idle.
-# Keeping the TTL comfortably above the request timeout - which bounds how long
-# any single call can run - makes that race unreachable.
+# A client in use is never reaped regardless of this value - the registry tracks
+# that exactly - so this floor is only here to stop a pathologically small TTL
+# from logging every account out between one tool call and the next.
 MIN_CLIENT_TTL = 60.0
 
 # Headers carrying the per-request credentials. ``get_http_headers`` lowercases
@@ -80,8 +79,8 @@ class ServerConfig:
             ROHLIK_MCP_HOST     (default 0.0.0.0)
             ROHLIK_MCP_PORT     (default 8000)
             ROHLIK_MCP_PATH     (default /mcp/)
-            ROHLIK_CLIENT_TTL   (seconds an idle account client is kept, default 900;
-                                 floored at 60s and at twice ROHLIK_TIMEOUT)
+            ROHLIK_CLIENT_TTL   (seconds an idle account client is kept, default 900,
+                                 floored at 60)
             ROHLIK_MAX_CLIENTS  (max cached account clients, default 50)
 
         Note there are no credential variables: credentials arrive per request.
@@ -94,6 +93,6 @@ class ServerConfig:
             host=os.environ.get("ROHLIK_MCP_HOST", DEFAULT_HOST),
             port=int(os.environ.get("ROHLIK_MCP_PORT", str(DEFAULT_PORT))),
             path=os.environ.get("ROHLIK_MCP_PATH", DEFAULT_PATH),
-            client_ttl=max(ttl, MIN_CLIENT_TTL, timeout * 2),
+            client_ttl=max(ttl, MIN_CLIENT_TTL),
             max_clients=max(1, int(os.environ.get("ROHLIK_MAX_CLIENTS", str(DEFAULT_MAX_CLIENTS)))),
         )

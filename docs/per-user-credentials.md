@@ -242,10 +242,15 @@ Implemented as described above, with these decisions settled:
   modes surface as `ToolError`, whose message FastMCP passes to the client
   verbatim: missing headers explain which headers to set, a rejected login says
   so and the entry is dropped so a corrected password is not shadowed.
-* The registry is an LRU `OrderedDict` with a background reaper. Both eviction
-  paths refuse to close an entry touched within the request timeout, so a call
-  in flight cannot have its session closed underneath it; `client_ttl` is floored
-  at 60s *and* at twice `ROHLIK_TIMEOUT` for the same reason.
+* The registry is an LRU `OrderedDict` with a background reaper. Neither
+  eviction path will close a client a tool call is still holding: `get_client()`
+  leases the entry, and a FastMCP middleware releases it when the call finishes,
+  however it finishes. An earlier draft approximated this with "untouched for at
+  least the request timeout", which review showed cannot hold — a 401 triggers a
+  relogin and retry, so one service call can run to roughly three times the
+  timeout, and `remove_from_cart` loops over its input, so no fixed multiple of
+  `ROHLIK_TIMEOUT` is safe. Counting leases exactly removes the guess, and lets
+  `client_ttl` go back to a plain 60s floor.
 * The login stampede is fixed here rather than upstream: `get_client()` performs
   the first login itself under a per-account lock, so a fanned-out tool logs in
   once. Verified end to end — five tool calls across three accounts produce

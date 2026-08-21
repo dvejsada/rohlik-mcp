@@ -53,20 +53,11 @@ def test_from_env_reads_optional_overrides(monkeypatch):
 
 
 def test_client_ttl_is_floored(monkeypatch):
-    """A TTL below the request timeout could reap a client mid-request."""
+    """A tiny TTL would log every account out between one tool call and the next."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("ROHLIK_CLIENT_TTL", "1")
 
     assert ServerConfig.from_env().client_ttl == MIN_CLIENT_TTL
-
-
-def test_client_ttl_floor_follows_the_request_timeout(monkeypatch):
-    """A generous timeout must not let the reaper close a call still in flight."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("ROHLIK_TIMEOUT", "120")
-    monkeypatch.setenv("ROHLIK_CLIENT_TTL", "90")
-
-    assert ServerConfig.from_env().client_ttl == 240.0
 
 
 def test_max_clients_is_at_least_one(monkeypatch):
