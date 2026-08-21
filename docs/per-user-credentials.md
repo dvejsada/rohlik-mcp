@@ -1,6 +1,8 @@
 # Per-user credentials & session lifecycle — investigation
 
-Status: **investigation only, nothing implemented.**
+Status: **implemented in 0.5.0.** Kept as the rationale behind the design; see
+the README for how to use it. Environment-based credentials were dropped
+outright, with no backwards-compatible fallback.
 Scope: (1) can the server accept per-user credentials instead of env vars, and be
 driven from LibreChat user vars? (2) do successive tool calls from one user cause
 a login/logout per call?
@@ -225,41 +227,32 @@ Behaviours that matter for the design:
 
 ---
 
-## 4. Recommendation
+## 4. What shipped (0.5.0)
 
-Feasible, and a fairly contained change. Suggested order:
+Implemented as described above, with these decisions settled:
 
-1. Split `Config` into server config + per-request credentials; stop failing
-   startup on missing credentials.
-2. Replace the `_client` global with a credential-keyed registry (TTL reaper,
-   LRU cap, per-key login lock), keeping `get_client()` no-arg so the tools are
-   untouched.
-3. Resolve credentials from `X-Rohlik-Username` / `X-Rohlik-Password`, with an
-   explicitly opt-in env fallback.
-4. Fix (or upstream a fix for) the unlocked `ensure_logged_in` login stampede.
-5. Harden the compose deployment: named network shared with LibreChat, no
-   published `ports:`, no credential env vars, `ROHLIK_MCP_AUTH_TOKEN` set.
-6. Docs: LibreChat section and a same-network compose example, updated variable
-   table.
+* **`ROHLIK_USERNAME` / `ROHLIK_PASSWORD` are gone.** No env fallback at all, so
+  a client that forgets its headers gets an actionable error rather than silently
+  shopping in the operator's account. `ServerConfig.from_env()` no longer raises,
+  so the server starts with no credentials configured.
+* `Config` split into `ServerConfig` (bind settings, base URL, timeout, cache
+  limits) and a per-request `Credentials`, whose `cache_key()` hashes username,
+  password *and* base URL.
+* `get_client()` is now `async` and resolves the account per request. Failure
+  modes surface as `ToolError`, whose message FastMCP passes to the client
+  verbatim: missing headers explain which headers to set, a rejected login says
+  so and the entry is dropped so a corrected password is not shadowed.
+* The registry is an LRU `OrderedDict` with a background reaper. Both eviction
+  paths refuse to close an entry touched within the request timeout, so a call
+  in flight cannot have its session closed underneath it; `client_ttl` is floored
+  at 60s *and* at twice `ROHLIK_TIMEOUT` for the same reason.
+* The login stampede is fixed here rather than upstream: `get_client()` performs
+  the first login itself under a per-account lock, so a fanned-out tool logs in
+  once. Verified end to end — five tool calls across three accounts produce
+  exactly three logins.
+* `docker-compose.yml` no longer publishes a port (`expose` only, on a named
+  network) and carries no credential variables.
 
-### Sketch: both services on one network
-
-```yaml
-services:
-  rohlik-mcp:
-    image: georgx22/rohlik-mcp:latest
-    restart: unless-stopped
-    environment:
-      ROHLIK_MCP_AUTH_TOKEN: ${ROHLIK_MCP_AUTH_TOKEN}
-      # no ROHLIK_USERNAME / ROHLIK_PASSWORD — credentials arrive per request
-    expose:
-      - "8000"          # reachable as http://rohlik-mcp:8000/ on the network only
-    networks: [librechat]
-
-networks:
-  librechat:
-    external: true      # or define it here and attach LibreChat to it
-```
-
-LibreChat's own compose then needs nothing beyond being attached to the same
-network and the `mcpServers` block above.
+Not done, and deliberately: no fix upstream in `rohlik-api` for the unlocked
+`AuthManager.ensure_logged_in`. This server no longer relies on it, but any other
+consumer that fans out on a cold client still has the bug.

@@ -29,7 +29,11 @@ def mock_client(monkeypatch):
     client.orders = MagicMock()
     client.delivery = MagicMock()
     client.account = MagicMock()
-    monkeypatch.setattr(server, "get_client", lambda: client)
+
+    async def _get_client():
+        return client
+
+    monkeypatch.setattr(server, "get_client", _get_client)
     return client
 
 
