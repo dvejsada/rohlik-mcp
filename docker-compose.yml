@@ -3,11 +3,19 @@ services:
     image: georgx22/rohlik-mcp:latest
     container_name: rohlik-mcp
     restart: unless-stopped
-    # Credentials and settings are read from .env (see .env.example).
+    # Settings are read from .env (see .env.example). Rohlik.cz credentials are
+    # NOT configured here — each client sends its own with every request.
     env_file: .env
-    # Publish the same port the server binds to (ROHLIK_MCP_PORT, default 8000).
-    ports:
-      - "${ROHLIK_MCP_PORT:-8000}:${ROHLIK_MCP_PORT:-8000}"
+    # Not published to the host: other containers on the network reach this as
+    # http://rohlik-mcp:8000/mcp/ by service name, which keeps the credential
+    # headers off localhost. Uncomment `ports` only if you need a client outside
+    # Docker, and set ROHLIK_MCP_AUTH_TOKEN if you do.
+    expose:
+      - "${ROHLIK_MCP_PORT:-8000}"
+    # ports:
+    #   - "${ROHLIK_MCP_PORT:-8000}:${ROHLIK_MCP_PORT:-8000}"
+    networks:
+      - rohlik-mcp
     healthcheck:
       test:
         - CMD
@@ -18,3 +26,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+networks:
+  rohlik-mcp:
+    # Attach LibreChat to this network too, then point librechat.yaml at
+    # http://rohlik-mcp:8000/mcp/ (see the README). Set `external: true` here
+    # instead to join a network LibreChat's own compose file already defines.
+    driver: bridge

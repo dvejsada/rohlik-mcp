@@ -37,76 +37,114 @@ Once it's connected, talk to your assistant naturally:
 
 ## 🚀 Quick start (Docker)
 
-The fastest way to get running — just plug in your Rohlik.cz login:
+The server holds **no credentials of its own** — each client sends its own
+Rohlik.cz login with every request, so one server can serve several people:
 
 ```bash
-docker run --rm -p 8000:8000 \
-  -e ROHLIK_USERNAME="your_email@example.com" \
-  -e ROHLIK_PASSWORD="your_password" \
-  georgx22/rohlik-mcp
+docker run --rm -p 8000:8000 georgx22/rohlik-mcp
 ```
 
 Your server is now live at **`http://localhost:8000/mcp/`**. That's it. 🎉
 
-> 🔒 **Your credentials never leave your machine.** They're passed straight to
-> Rohlik.cz from your own container.
+> 🔒 **Your credentials never leave your machine.** They travel from your MCP
+> client to your own container, and from there straight to Rohlik.cz. Nothing is
+> stored on disk.
 
 ---
 
 ## 🔌 Connect your MCP client
 
-Point any client that speaks Streamable HTTP at the endpoint:
-
-```json
-{
-  "mcpServers": {
-    "rohlik": {
-      "url": "http://localhost:8000/mcp/"
-    }
-  }
-}
-```
-
-Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
-[`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
-
-```json
-{
-  "mcpServers": {
-    "rohlik": {
-      "command": "npx",
-      "args": ["mcp-remote", "http://localhost:8000/mcp/"]
-    }
-  }
-}
-```
-
-### 🔑 Authentication (optional)
-
-By default the endpoint is **unauthenticated** — anyone who can reach it can use
-the tools (including the ones that change your real cart). If the server is
-reachable beyond your own machine, set **`ROHLIK_MCP_AUTH_TOKEN`** to a long
-random string; clients must then send it as a bearer token. Use this config
-**instead of** the plain one above:
+Point any client that speaks Streamable HTTP at the endpoint, and send your
+Rohlik.cz login as two headers:
 
 ```json
 {
   "mcpServers": {
     "rohlik": {
       "url": "http://localhost:8000/mcp/",
-      "headers": { "Authorization": "Bearer your-token-here" }
+      "headers": {
+        "X-Rohlik-Username": "your_email@example.com",
+        "X-Rohlik-Password": "your_password"
+      }
     }
   }
 }
 ```
 
-> The `headers` field is supported by Streamable-HTTP-capable clients. On
-> stdio-only clients (e.g. via `mcp-remote`), pass the header the way that tool
-> documents it instead.
+Using a stdio-only client (like some Claude Desktop setups)? Bridge to it with
+[`mcp-remote`](https://www.npmjs.com/package/mcp-remote), passing the headers the
+way that tool documents:
 
-> The static token is a lightweight gate suitable for a personal, self-hosted
-> server. For anything internet-exposed, also put it behind TLS / a reverse
-> proxy.
+```json
+{
+  "mcpServers": {
+    "rohlik": {
+      "command": "npx",
+      "args": [
+        "mcp-remote", "http://localhost:8000/mcp/",
+        "--header", "X-Rohlik-Username:your_email@example.com",
+        "--header", "X-Rohlik-Password:your_password"
+      ]
+    }
+  }
+}
+```
+
+The server logs in once per account and reuses that session for every following
+tool call, so a conversation costs one login rather than one per call. A session
+left unused for 15 minutes is logged out and discarded; the next call simply logs
+in again.
+
+### 🧑‍🤝‍🧑 LibreChat (per-user credentials)
+
+Because credentials arrive per request, LibreChat's
+[`customUserVars`](https://www.librechat.ai/docs/features/mcp) let **each user
+supply their own Rohlik.cz login** from the MCP settings panel — nothing is baked
+into the config. In `librechat.yaml`:
+
+```yaml
+mcpServers:
+  rohlik:
+    type: streamable-http
+    url: "http://rohlik-mcp:8000/mcp/"   # Docker service name, shared network
+    headers:
+      X-Rohlik-Username: "{{ROHLIK_USERNAME}}"
+      X-Rohlik-Password: "{{ROHLIK_PASSWORD}}"
+      Authorization: "Bearer ${ROHLIK_MCP_AUTH_TOKEN}"
+    customUserVars:
+      ROHLIK_USERNAME:
+        title: "Rohlik.cz e-mail"
+        description: "The e-mail you sign in to rohlik.cz with."
+      ROHLIK_PASSWORD:
+        title: "Rohlik.cz password"
+        description: "Your rohlik.cz password. LibreChat stores it encrypted."
+    timeout: 60000
+```
+
+Servers declaring `customUserVars` are excluded from LibreChat's app-level
+connections automatically, so it won't try to connect before a user has filled
+theirs in. LibreChat re-resolves the headers before each tool call, so changing
+your password takes effect on the next message.
+
+### 🔑 Authentication (optional)
+
+The credential headers say *which account* to act on; they don't say who may
+reach the server at all. By default the endpoint is **open** — anything that can
+reach it can drive the tools with any credentials it likes. Set
+**`ROHLIK_MCP_AUTH_TOKEN`** to a long random string and clients must also present
+it as `Authorization: Bearer <token>`, as in the LibreChat example above.
+
+> Worth setting whenever the server is reachable by anything other than your own
+> MCP client — including other containers on a shared Docker network.
+
+### 🐳 Alongside LibreChat on one Docker network
+
+`docker-compose.yml` in this repo attaches the server to an external network and
+**does not publish a port**: LibreChat reaches it as `http://rohlik-mcp:8000/`
+by service name, and passwords stay on the Docker bridge rather than on
+`localhost:8000` where anything on the host could reach them. Publish the port
+only if you need a client outside Docker, and set `ROHLIK_MCP_AUTH_TOKEN` if you
+do.
 
 ---
 
@@ -176,18 +214,20 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 
 ## ⚙️ Configuration
 
-Everything is configured through environment variables:
+Rohlik.cz credentials are **not** configured here — they come from each request's
+`X-Rohlik-Username` / `X-Rohlik-Password` headers. Everything else is environment
+variables:
 
-| Variable | Required | Default | Description |
-| -------- | :------: | ------- | ----------- |
-| `ROHLIK_USERNAME` | ✅ | — | Rohlik.cz account email |
-| `ROHLIK_PASSWORD` | ✅ | — | Rohlik.cz account password |
-| `ROHLIK_BASE_URL` | | `https://www.rohlik.cz` | API base URL |
-| `ROHLIK_TIMEOUT` | | `30` | Request timeout (seconds) |
-| `ROHLIK_MCP_HOST` | | `0.0.0.0` | HTTP bind host |
-| `ROHLIK_MCP_PORT` | | `8000` | HTTP bind port |
-| `ROHLIK_MCP_PATH` | | `/mcp/` | HTTP endpoint path |
-| `ROHLIK_MCP_AUTH_TOKEN` | | — | Bearer token clients must present; auth is disabled when unset |
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `ROHLIK_MCP_AUTH_TOKEN` | — | Bearer token clients must present; auth is disabled when unset |
+| `ROHLIK_BASE_URL` | `https://www.rohlik.cz` | API base URL |
+| `ROHLIK_TIMEOUT` | `30` | Request timeout (seconds) |
+| `ROHLIK_MCP_HOST` | `0.0.0.0` | HTTP bind host |
+| `ROHLIK_MCP_PORT` | `8000` | HTTP bind port |
+| `ROHLIK_MCP_PATH` | `/mcp/` | HTTP endpoint path |
+| `ROHLIK_CLIENT_TTL` | `900` | Seconds an unused account session is kept before logging out (min 60) |
+| `ROHLIK_MAX_CLIENTS` | `50` | Most account sessions held at once; the least recently used is dropped first |
 
 ---
 
@@ -200,10 +240,10 @@ git clone https://github.com/dvejsada/rohlik-mcp
 cd rohlik-mcp
 pip install -e ".[dev]"
 
-export ROHLIK_USERNAME="your_email@example.com"
-export ROHLIK_PASSWORD="your_password"
 rohlik-mcp          # or: python -m rohlik_mcp
 ```
+
+No credentials to export — the server takes them from each request.
 
 You can also build the Docker image yourself:
 
