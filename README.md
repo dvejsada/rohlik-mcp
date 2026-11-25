@@ -197,8 +197,8 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 ### 🛒 Cart
 | Tool | What it does |
 | ---- | ------------ |
-| `get_cart` | Current cart contents and total |
-| `add_to_cart` | Add one or more products in one call |
+| `get_cart` | Current cart contents and total, plus how much is still needed to reach the shop's minimum order |
+| `add_to_cart` | Add one or more products in one call; returns the new total and the amount still needed for the minimum order |
 | `remove_from_cart` | Remove one or more items in one call |
 
 ### 👩‍🍳 Recipes (Rohlík Chef)
@@ -211,7 +211,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 ### 📦 Orders
 | Tool | What it does |
 | ---- | ------------ |
-| `get_next_order` | Your next upcoming order |
+| `get_next_order` | Your upcoming orders, soonest first: slot, total, item count (compact; use `get_order_detail` for line items) |
 | `get_last_order` | Your most recent delivered order |
 | `get_delivered_orders` | Your order history |
 | `get_order_detail` | Full detail of one or more orders by ID |
@@ -230,7 +230,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | Tool | What it does |
 | ---- | ------------ |
 | `get_shopping_list` | One or more saved shopping lists by ID |
-| `get_account_overview` | Trimmed one-call snapshot: cart, orders, delivery & more |
+| `get_account_overview` | Trimmed one-call snapshot: shop, cart, upcoming orders, next delivery's live ETA & more |
 | `get_premium_profile` | Premium (membership) profile |
 | `get_bags_info` | Reusable shopping bags |
 | `get_announcements` | Account announcements |

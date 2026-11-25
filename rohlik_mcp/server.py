@@ -33,7 +33,15 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult as FastMCPToolResult
-from rohlik_api import DeliveryTracking, RohlikAPI, RohlikAPIError, Site
+from rohlik_api import (
+    Cart,
+    DeliveryTracking,
+    NextDelivery,
+    RohlikAPI,
+    RohlikAPIError,
+    Site,
+    UpcomingOrder,
+)
 
 from .config import (
     PASSWORD_HEADER,
@@ -564,10 +572,43 @@ async def get_weekly_sales(size: int = 30) -> ToolResult:
 # ---------------------------------------------------------------------------
 
 
+def _shop_tz(shop: Site) -> ZoneInfo:
+    """Return the shop's timezone, for rendering the typed models' times locally."""
+    return ZoneInfo(shop.timezone)
+
+
+def _cart_fields(cart: Cart, shop: Site) -> dict[str, Any]:
+    """Serialise a cart and add how far it is from the shop's minimum order.
+
+    ``remaining_to_minimum`` is ``0`` once the total reaches the minimum, and
+    ``null`` when the shop reports no minimum. ``currency`` falls back to the
+    shop's when the cart has no items to take it from.
+    """
+    fields: dict[str, Any] = _serialize(cart)
+    fields["currency"] = cart.currency or shop.currency
+    minimum = cart.minimum_order_price
+    fields["remaining_to_minimum"] = (
+        round(max(0.0, minimum - cart.total_price), 2) if minimum is not None else None
+    )
+    return fields
+
+
 @mcp.tool()
 async def get_cart() -> ToolResult:
-    """Get the current shopping cart contents and total price."""
-    return await _call((await get_client()).cart.get_content())
+    """Get the current shopping cart: items, total price and currency.
+
+    Also returns the shop's ``minimum_order_price`` and ``remaining_to_minimum``,
+    the amount still needed before an order can be placed (``0`` once reached).
+    ``can_make_order`` covers more than the minimum (e.g. a chosen delivery
+    slot), so use ``remaining_to_minimum`` to answer "is my cart big enough?".
+    """
+    client = await get_client()
+    shop = read_shop(get_config())
+    try:
+        cart = await client.cart.get_content()
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+    return _cart_fields(cart, shop)
 
 
 @mcp.tool()
@@ -579,7 +620,11 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
             ``quantity`` defaults to 1 when omitted. Pass a single-entry list to
             add just one product.
 
-    Returns the product IDs that were successfully added and any that failed.
+    Returns the product IDs that were successfully added and any that failed,
+    plus a ``cart`` summary afterwards: ``total_price``, ``currency`` and
+    ``remaining_to_minimum`` (the amount still needed to reach the shop's
+    minimum order; ``0`` once reached). The summary is an ``{"error": ...}``
+    if the cart could not be read back; the items were still added.
     """
     if not items:
         return {"added": [], "failed": []}
@@ -594,14 +639,29 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
         }
 
     requested = [entry["product_id"] for entry in payload]
-    added = await _call((await get_client()).cart.add_items(payload))
+    client = await get_client()
+    added = await _call(client.cart.add_items(payload))
     if not isinstance(added, list):
         # _call returned an error payload (or "no data") — surface it unchanged
         # instead of masking it as every item having failed.
         return added
+
+    # One extra request, so the model can say how far the cart is from the
+    # minimum order without a separate get_cart call.
+    summary: dict[str, Any]
+    try:
+        cart = _cart_fields(await client.cart.get_content(), read_shop(get_config()))
+    except RohlikAPIError as err:
+        summary = {"error": str(err)}
+    else:
+        summary = {
+            key: cart[key]
+            for key in ("total_price", "currency", "minimum_order_price", "remaining_to_minimum")
+        }
     return {
         "added": added,
         "failed": [pid for pid in requested if pid not in added],
+        "cart": summary,
     }
 
 
@@ -671,8 +731,20 @@ async def get_ingredient_products(
 
 @mcp.tool()
 async def get_next_order() -> ToolResult:
-    """Get the next upcoming order."""
-    return await _call((await get_client()).orders.get_next())
+    """Get the upcoming (not yet delivered) orders, soonest delivery first.
+
+    Each has its ``id``, delivery slot, order time, item count, total price and
+    currency; times are in the shop's timezone. An empty list means there is no
+    upcoming order. For an order's line items use ``get_order_detail``; for
+    when it will arrive use ``track_delivery``.
+    """
+    client = await get_client()
+    tz = _shop_tz(read_shop(get_config()))
+    orders = await client.orders.get_upcoming()
+    if orders is None:
+        return {"error": "Cannot fetch upcoming orders."}
+    serialized: list[Any] = _serialize(orders, tz)
+    return serialized
 
 
 @mcp.tool()
@@ -762,8 +834,9 @@ async def track_delivery(order_id: int | None = None) -> ToolResult:
     if order_id is not None and order_id < 0:
         return {"error": "Invalid order_id: it must not be negative."}
     orders = (await get_client()).orders
-    timezone_name = read_shop(get_config()).timezone
-    tz = ZoneInfo(timezone_name)
+    shop = read_shop(get_config())
+    timezone_name = shop.timezone
+    tz = _shop_tz(shop)
     try:
         if order_id is not None:
             tracking = await orders.get_delivery_tracking(order_id, raise_on_error=True)
@@ -777,6 +850,11 @@ async def track_delivery(order_id: int | None = None) -> ToolResult:
 
     if nxt is None:
         return "There is no upcoming order to track."
+    return _format_next_delivery(nxt, tz, timezone_name)
+
+
+def _format_next_delivery(nxt: NextDelivery, tz: tzinfo, timezone_name: str) -> dict[str, Any]:
+    """Flatten a ``NextDelivery`` into a compact dict, times in the shop's ``tz``."""
     order = nxt.order
     return _serialize_fields(
         {
@@ -855,24 +933,26 @@ async def get_account_overview() -> ToolResult:
     """Get a trimmed one-call snapshot of the account.
 
     Starts with the ``shop`` the account is on (name, currency, timezone), then
-    combines delivery info, the next and last orders, cart contents, premium
-    profile, reusable-bags info, announcements (account and delivery, the
-    latter carrying the delivery-time ETA), the reserved timeslot and the
-    next available delivery slot in a single call. The full delivered-order
-    history is excluded — use ``get_delivered_orders`` for that. Prefer the
-    specific tools when only one piece of information is needed.
+    combines delivery info, the upcoming orders, the ``next_delivery`` (the
+    soonest order's live status and resolved ETA, as ``track_delivery`` gives
+    it; ``null`` with no upcoming order), the last order, the cart (with
+    ``remaining_to_minimum``), premium profile, reusable-bags info, account
+    announcements, the reserved timeslot and the next available delivery slot
+    in a single call. The full delivered-order history is excluded — use
+    ``get_delivered_orders`` for that. Prefer the specific tools when only one
+    piece of information is needed.
     """
     client = await get_client()
     shop = read_shop(get_config())
+    tz = _shop_tz(shop)
     sections: list[tuple[str, Awaitable[Any]]] = [
         ("delivery", client.delivery.get_info()),
-        ("next_order", client.orders.get_next()),
+        ("upcoming_orders", client.orders.get_upcoming()),
         ("last_order", client.orders.get_last()),
         ("cart", client.cart.get_content()),
         ("premium_profile", client.account.get_premium_profile()),
         ("bags", client.account.get_bags_info()),
         ("announcements", client.account.get_announcements()),
-        ("delivery_announcements", client.delivery.get_announcements()),
         ("timeslot", client.delivery.get_timeslot_reservation()),
         ("next_delivery_slot", client.delivery.get_next_slots()),
     ]
@@ -886,14 +966,49 @@ async def get_account_overview() -> ToolResult:
             "timezone": shop.timezone,
         }
     }
+    upcoming: list[UpcomingOrder] | None = None
     for name, result in zip(names, results, strict=True):
         if isinstance(result, RohlikAPIError):
             out[name] = {"error": str(result)}
         elif isinstance(result, BaseException):
             raise result
+        elif name == "upcoming_orders" and result is None:
+            out[name] = {"error": "Cannot fetch upcoming orders."}
+        elif name == "upcoming_orders":
+            upcoming = result
+            out[name] = _serialize(result, tz)
+        elif name == "cart":
+            out[name] = _cart_fields(result, shop)
         else:
-            out[name] = _serialize(result)
+            out[name] = _serialize(result, tz)
+
+    if upcoming is None:
+        out["next_delivery"] = {"error": "Upcoming orders unavailable, so no delivery to track."}
+    else:
+        out["next_delivery"] = await _next_delivery_for(client, upcoming, tz, shop.timezone)
     return out
+
+
+async def _next_delivery_for(
+    client: RohlikAPI, upcoming: list[UpcomingOrder], tz: tzinfo, timezone_name: str
+) -> dict[str, Any] | None:
+    """Track the soonest of ``upcoming`` (already fetched) and resolve its ETA.
+
+    This is ``orders.get_next_delivery`` without its second fetch of the
+    upcoming orders: one request, and none when there is no upcoming order.
+    """
+    if not upcoming:
+        return None
+    order = upcoming[0]
+    try:
+        tracking = await client.orders.get_delivery_tracking(order.id, raise_on_error=True)
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+    try:
+        nxt = NextDelivery.resolve(order, tracking)
+    except ValueError as err:
+        return {"error": f"Inconsistent delivery tracking: {err}"}
+    return _format_next_delivery(nxt, tz, timezone_name)
 
 
 @mcp.tool()
