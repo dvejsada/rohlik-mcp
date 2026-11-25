@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rohlik-mcp"
 dynamic = ["version"]
-description = "Model Context Protocol (MCP) server for the Rohlik.cz API"
+description = "Model Context Protocol (MCP) server for the Rohlik.cz API (also Knuspr.de, Gurkerl.at, Kifli.hu and Sezamo.ro)"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"

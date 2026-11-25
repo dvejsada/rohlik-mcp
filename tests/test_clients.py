@@ -12,7 +12,7 @@ from fastmcp.exceptions import ToolError
 from rohlik_api import InvalidCredentialsError
 
 from rohlik_mcp import server
-from rohlik_mcp.config import PASSWORD_HEADER, USERNAME_HEADER, ServerConfig
+from rohlik_mcp.config import PASSWORD_HEADER, SITE_HEADER, USERNAME_HEADER, ServerConfig
 
 
 class FakeAPI:
@@ -63,12 +63,14 @@ def headers(monkeypatch):
     current: dict[str, str] = {}
     monkeypatch.setattr(server, "get_http_headers", lambda: dict(current))
 
-    def _set(username=None, password=None):
+    def _set(username=None, password=None, site=None):
         current.clear()
         if username is not None:
             current[USERNAME_HEADER] = username
         if password is not None:
             current[PASSWORD_HEADER] = password
+        if site is not None:
+            current[SITE_HEADER] = site
 
     return _set
 
@@ -124,7 +126,7 @@ class TestReadCredentials:
         """Over stdio there are no headers, so there is nothing to fall back to."""
         monkeypatch.setattr(server, "get_http_headers", dict)
 
-        with pytest.raises(ToolError, match="No Rohlik.cz credentials"):
+        with pytest.raises(ToolError, match="No shop login credentials"):
             server.read_credentials()
 
 
@@ -151,6 +153,45 @@ class TestGetClient:
         assert client.base_url == "https://example.test"
         assert client.timeout == 12.0
         assert client.auto_login is False
+
+    async def test_defaults_to_rohlik_cz(self, headers, monkeypatch):
+        monkeypatch.delenv("ROHLIK_SITE", raising=False)
+        monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+        headers("user@example.com", "secret")
+
+        assert (await server.get_client()).base_url == "https://www.rohlik.cz"
+
+    async def test_site_header_picks_the_shop(self, headers, monkeypatch):
+        monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+        headers("user@example.com", "secret", site="de")
+
+        assert (await server.get_client()).base_url == "https://www.knuspr.de"
+
+    async def test_one_login_on_two_shops_gets_two_sessions(self, headers, registry, monkeypatch):
+        """The same email on Rohlik.cz and Knuspr.de are different accounts."""
+        monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+        headers("user@example.com", "secret", site="cz")
+        cz = await server.get_client()
+        headers("user@example.com", "secret", site="de")
+        de = await server.get_client()
+
+        assert cz is not de
+        assert len(registry) == 2
+
+    async def test_unknown_site_header_is_an_actionable_error(self, headers, registry):
+        headers("user@example.com", "secret", site="uk")
+
+        with pytest.raises(ToolError, match="x-rohlik-site"):
+            await server.get_client()
+        assert len(registry) == 0
+
+    async def test_login_failure_names_the_shop(self, headers, monkeypatch):
+        monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+        FakeAPI.invalid.add(("user@example.com", "wrong"))
+        headers("user@example.com", "wrong", site="at")
+
+        with pytest.raises(ToolError, match="Gurkerl.at login failed"):
+            await server.get_client()
 
     async def test_concurrent_first_calls_share_one_login(self, headers, registry):
         """A fanned-out tool must not fire one login per in-flight coroutine."""

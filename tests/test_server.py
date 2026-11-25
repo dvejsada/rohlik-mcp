@@ -5,6 +5,7 @@ access or credentials are required.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,6 +43,26 @@ def mock_client(monkeypatch):
 
 
 class TestSerialize:
+    def test_datetimes_become_iso_strings_at_any_depth(self):
+        when = datetime(2026, 11, 24, 13, 0, tzinfo=timezone(timedelta(hours=1)))
+        order = UpcomingOrder(
+            id=1,
+            slot_id=None,
+            slot_type=None,
+            slot_since=when,
+            slot_till=None,
+            order_time=None,
+            items_count=None,
+            items_total_quantity=None,
+            total_price=None,
+            currency=None,
+        )
+        result = server._serialize({"orders": [order], "at": (when,)})
+
+        assert result["orders"][0]["slot_since"] == "2026-11-24T13:00:00+01:00"
+        assert result["at"] == ["2026-11-24T13:00:00+01:00"]
+        json.dumps(result)
+
     def test_dataclass_to_dict(self):
         item = CartItem(id="1", cart_item_id="f1", name="Milk", quantity=2, price=20.0)
         assert server._serialize(item) == {
@@ -266,6 +287,25 @@ class TestAccountAndDeliveryTools:
         assert result["premium_profile"] == {"active": True}
         assert result["last_order"] is None
         assert result["delivery_announcements"]["data"]["announcements"][0]["id"] == 1
+
+    async def test_get_account_overview_names_the_shop(self, mock_client, monkeypatch):
+        for name in ("get_info", "get_announcements", "get_timeslot_reservation", "get_next_slots"):
+            setattr(mock_client.delivery, name, AsyncMock(return_value=None))
+        for name in ("get_next", "get_last"):
+            setattr(mock_client.orders, name, AsyncMock(return_value=None))
+        mock_client.cart.get_content = AsyncMock(return_value=None)
+        for name in ("get_premium_profile", "get_bags_info", "get_announcements"):
+            setattr(mock_client.account, name, AsyncMock(return_value=None))
+        monkeypatch.setattr(server, "get_http_headers", lambda: {"x-rohlik-site": "ro"})
+
+        result = await server.get_account_overview()
+
+        assert result["shop"] == {
+            "code": "ro",
+            "name": "Sezamo.ro",
+            "currency": "RON",
+            "timezone": "Europe/Bucharest",
+        }
 
     async def test_get_shopping_list_bulk_surfaces_per_item_error(self, mock_client):
         mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
