@@ -52,6 +52,9 @@ def registry(monkeypatch):
     monkeypatch.setattr(server, "_clients", server.OrderedDict())
     monkeypatch.setattr(server, "_pending_closes", set())
     monkeypatch.setattr(FakeAPI, "invalid", set())
+    # Shop settings come from a clean environment, not the developer's shell.
+    monkeypatch.delenv("ROHLIK_SITE", raising=False)
+    monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
     server.get_config.cache_clear()
     yield server._clients
     server.get_config.cache_clear()
@@ -155,8 +158,6 @@ class TestGetClient:
         assert client.auto_login is False
 
     async def test_defaults_to_rohlik_cz(self, headers, monkeypatch):
-        monkeypatch.delenv("ROHLIK_SITE", raising=False)
-        monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
         headers("user@example.com", "secret")
 
         assert (await server.get_client()).base_url == "https://www.rohlik.cz"
@@ -192,6 +193,36 @@ class TestGetClient:
 
         with pytest.raises(ToolError, match="Gurkerl.at login failed"):
             await server.get_client()
+
+    async def test_pinned_url_is_used_and_keys_the_cache(self, headers, registry, monkeypatch):
+        monkeypatch.setenv("ROHLIK_BASE_URL", "https://proxy.test")
+        headers("user@example.com", "secret")
+
+        client = await server.get_client()
+
+        assert client.base_url == "https://proxy.test"
+        (key,) = registry
+        assert key == server.Credentials("user@example.com", "secret").cache_key(
+            "https://proxy.test"
+        )
+
+    async def test_pinned_url_refuses_another_shop(self, headers, registry, monkeypatch):
+        monkeypatch.setenv("ROHLIK_BASE_URL", "https://proxy.test")
+        headers("user@example.com", "secret", site="de")
+
+        with pytest.raises(ToolError, match="pinned to https://proxy.test"):
+            await server.get_client()
+        assert len(registry) == 0
+
+    async def test_legacy_shop_url_selects_that_shop(self, headers, registry, monkeypatch):
+        """ROHLIK_BASE_URL=https://www.knuspr.de predates ROHLIK_SITE and must keep working."""
+        monkeypatch.setenv("ROHLIK_BASE_URL", "https://www.knuspr.de/")
+        headers("user@example.com", "secret")
+        assert (await server.get_client()).base_url == "https://www.knuspr.de"
+
+        # Not a pin: other shops stay reachable through the header.
+        headers("user@example.com", "secret", site="cz")
+        assert (await server.get_client()).base_url == "https://www.rohlik.cz"
 
     async def test_concurrent_first_calls_share_one_login(self, headers, registry):
         """A fanned-out tool must not fire one login per in-flight coroutine."""

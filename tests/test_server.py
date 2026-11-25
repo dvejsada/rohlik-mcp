@@ -24,6 +24,16 @@ from rohlik_api import (
 from rohlik_mcp import server
 
 
+@pytest.fixture(autouse=True)
+def clean_config(monkeypatch):
+    """Read the shop settings from a clean environment, not the developer's shell."""
+    monkeypatch.delenv("ROHLIK_SITE", raising=False)
+    monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+    server.get_config.cache_clear()
+    yield
+    server.get_config.cache_clear()
+
+
 @pytest.fixture
 def mock_client(monkeypatch):
     """Patch server.get_client to return a fully mocked RohlikAPI client."""
@@ -441,12 +451,62 @@ class TestTrackDelivery:
         assert result["status"] == "ON_THE_WAY"
         assert result["is_active"] is True
         assert result["stops_before"] == 2
-        assert result["estimated_arrival"] == "2026-11-24T12:40:00+00:00"
+        # Served in UTC, returned in Prague time like the slot, so the two compare.
+        assert result["timezone"] == "Europe/Prague"
+        assert result["estimated_arrival"] == "2026-11-24T13:40:00+01:00"
+        assert result["generated_at"] == "2026-11-24T13:20:00+01:00"
         assert result["slot_since"] == "2026-11-24T13:00:00+01:00"
         # ~0.01 degrees of latitude is ~1.1 km.
         assert 1000 < result["courier_distance_m"] < 1200
         assert "50.0755" not in json.dumps(result)
         assert "latitude" not in json.dumps(result)
+
+    async def test_times_follow_the_shops_timezone(self, mock_client, monkeypatch):
+        tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+        monkeypatch.setattr(server, "get_http_headers", lambda: {"x-rohlik-site": "ro"})
+
+        result = await server.track_delivery(order_id=777)
+
+        assert result["timezone"] == "Europe/Bucharest"
+        assert result["estimated_arrival"] == "2026-11-24T14:40:00+02:00"
+        assert result["slot_since"] == "2026-11-24T14:00:00+02:00"
+
+    async def test_before_the_order_is_queued(self, mock_client):
+        payload = {key: value for key, value in _TRACKING_PAYLOAD.items() if key != "progress"}
+        tracking = DeliveryTracking.from_api(payload)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+
+        result = await server.track_delivery(order_id=777)
+
+        assert result["status"] is None
+        assert result["is_active"] is False
+        assert result["estimated_arrival"] is None
+        assert result["courier_distance_m"] is None
+        assert result["generated_at"] is None
+        assert result["slot_since"] == "2026-11-24T13:00:00+01:00"
+
+    async def test_negative_order_id_is_rejected_without_a_request(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock()
+
+        result = await server.track_delivery(order_id=-1)
+
+        assert result == {"error": "Invalid order_id: it must not be negative."}
+        mock_client.orders.get_delivery_tracking.assert_not_awaited()
+
+    async def test_by_order_id_failure_is_reported(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock(
+            side_effect=APIRequestFailedError("tracking down")
+        )
+
+        assert await server.track_delivery(order_id=777) == {"error": "tracking down"}
+
+    async def test_unrelated_value_errors_are_not_called_invalid_input(self, mock_client):
+        """Only a bad order_id is the caller's fault; anything else must surface."""
+        mock_client.orders.get_next_delivery = AsyncMock(side_effect=ValueError("bad JSON"))
+
+        with pytest.raises(ValueError, match="bad JSON"):
+            await server.track_delivery()
 
     async def test_by_order_id_without_tracking(self, mock_client):
         mock_client.orders.get_delivery_tracking = AsyncMock(return_value=None)
@@ -466,6 +526,8 @@ class TestTrackDelivery:
         mock_client.orders.get_next_delivery = AsyncMock(return_value=nxt)
         result = await server.track_delivery()
         assert result["order_id"] == 777
+        assert result["timezone"] == "Europe/Prague"
+        assert result["eta"] == "2026-11-24T13:40:00+01:00"
         assert result["eta_source"] == "tracking"
         assert result["order"]["currency"] == "CZK"
         assert result["tracking"]["status"] == "ON_THE_WAY"

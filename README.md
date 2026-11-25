@@ -39,7 +39,7 @@ Once it's connected, talk to your assistant naturally:
 ## 🚀 Quick start (Docker)
 
 The server holds **no credentials of its own** — each client sends its own
-Rohlik.cz login with every request, so one server can serve several people:
+shop login with every request, so one server can serve several people:
 
 ```bash
 docker run --rm -p 8000:8000 georgx22/rohlik-mcp
@@ -48,7 +48,7 @@ docker run --rm -p 8000:8000 georgx22/rohlik-mcp
 Your server is now live at **`http://localhost:8000/mcp/`**. That's it. 🎉
 
 > 🔒 **Your credentials never leave your machine.** They travel from your MCP
-> client to your own container, and from there straight to Rohlik.cz. Nothing is
+> client to your own container, and from there straight to the shop. Nothing is
 > stored on disk.
 
 ---
@@ -56,7 +56,7 @@ Your server is now live at **`http://localhost:8000/mcp/`**. That's it. 🎉
 ## 🔌 Connect your MCP client
 
 Point any client that speaks Streamable HTTP at the endpoint, and send your
-Rohlik.cz login as two headers:
+Rohlik.cz login as two headers (for another shop, see [Other shops](#-other-shops)):
 
 ```json
 {
@@ -223,7 +223,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | `get_delivery_addresses` | Saved delivery addresses |
 | `get_next_delivery_slots` | Next available delivery slots |
 | `get_timeslot_reservation` | Your currently reserved slot |
-| `track_delivery` | Live tracking: status, courier ETA, stops before yours, courier distance |
+| `track_delivery` | Live tracking: status, courier ETA, stops before yours, courier distance and first name (times in the shop's timezone; coordinates are never returned) |
 | `get_delivery_announcements` | Delivery announcements incl. the live delivery-time ETA |
 
 ### 👤 Account
@@ -235,7 +235,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | `get_bags_info` | Reusable shopping bags |
 | `get_announcements` | Account announcements |
 
-> ⚠️ **`add_to_cart` and `remove_from_cart` change your real Rohlik cart.**
+> ⚠️ **`add_to_cart` and `remove_from_cart` change your real shop cart.**
 > Everything else is read-only.
 
 ---
@@ -251,7 +251,7 @@ variables:
 | -------- | ------- | ----------- |
 | `ROHLIK_MCP_AUTH_TOKEN` | — | Bearer token clients must present; auth is disabled when unset |
 | `ROHLIK_SITE` | `cz` | Default shop when a request has no `X-Rohlik-Site` header: `cz`, `de`, `at`, `hu` or `ro`. An unknown code stops the server at startup |
-| `ROHLIK_BASE_URL` | — | Advanced: sends every request to this URL (e.g. a proxy) instead of the shop's own. The server then serves only its `ROHLIK_SITE` shop, and a request asking for another is refused |
+| `ROHLIK_BASE_URL` | — | Advanced: sends every request to this URL (e.g. a proxy) instead of the shop's own. The server then serves only its `ROHLIK_SITE` shop, and a request asking for another is refused. A shop's own address (e.g. `https://www.knuspr.de`, the old way to pick a shop) is read as `ROHLIK_SITE` for that shop instead, with no pin |
 | `ROHLIK_TIMEOUT` | `30` | Request timeout (seconds) |
 | `ROHLIK_MCP_HOST` | `0.0.0.0` | HTTP bind host |
 | `ROHLIK_MCP_PORT` | `8000` | HTTP bind port |
@@ -263,7 +263,7 @@ variables:
 
 ## 🛠️ Running from source
 
-Prefer Python over Docker? You'll need **Python 3.13+** and a Rohlik.cz account.
+Prefer Python over Docker? You'll need **Python 3.13+** and an account on Rohlik.cz or one of its sister shops.
 
 ```bash
 git clone https://github.com/dvejsada/rohlik-mcp
@@ -299,6 +299,6 @@ mypy rohlik_mcp        # type checks
 
 Released under the [MIT License](LICENSE).
 
-> **Unofficial project.** It uses the non-public Rohlik.cz API and is not
-> affiliated with, authorised by, or endorsed by Rohlik.cz. Use at your own
+> **Unofficial project.** It uses the non-public Rohlík Group API and is not
+> affiliated with, authorised by, or endorsed by Rohlík Group or its shops. Use at your own
 > discretion.

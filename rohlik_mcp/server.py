@@ -22,9 +22,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
-from datetime import datetime
+from datetime import datetime, tzinfo
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import mcp.types as mt
 from fastmcp import FastMCP
@@ -291,21 +292,23 @@ async def _close_all_clients() -> None:
         await asyncio.gather(*list(_pending_closes), return_exceptions=True)
 
 
-def _serialize(obj: Any) -> Any:
+def _serialize(obj: Any, tz: tzinfo | None = None) -> Any:
     """Recursively convert API results into JSON-serialisable structures.
 
     Dataclass models become dicts, and every ``datetime`` at any depth becomes
-    an ISO 8601 string that keeps its UTC offset (the typed models' timestamps
-    are timezone-aware), so all tools render times the same way.
+    an ISO 8601 string with its UTC offset (the typed models' timestamps are
+    timezone-aware). With ``tz``, each is first converted to that timezone, so
+    one result never mixes UTC and local times. Timestamps inside raw API
+    payloads are strings already and pass through in the shop's own format.
     """
     if is_dataclass(obj) and not isinstance(obj, type):
         obj = asdict(obj)
     if isinstance(obj, datetime):
-        return obj.isoformat()
+        return (obj.astimezone(tz) if tz is not None else obj).isoformat()
     if isinstance(obj, dict):
-        return {key: _serialize(value) for key, value in obj.items()}
+        return {key: _serialize(value, tz) for key, value in obj.items()}
     if isinstance(obj, list | tuple):
-        return [_serialize(item) for item in obj]
+        return [_serialize(item, tz) for item in obj]
     return obj
 
 
@@ -326,9 +329,9 @@ async def _call(coro: Awaitable[Any]) -> ToolResult:
     return result
 
 
-def _serialize_fields(fields: dict[str, Any]) -> dict[str, Any]:
+def _serialize_fields(fields: dict[str, Any], tz: tzinfo | None = None) -> dict[str, Any]:
     """Serialise each value of a dict built by a tool (see :func:`_serialize`)."""
-    return {key: _serialize(value) for key, value in fields.items()}
+    return {key: _serialize(value, tz) for key, value in fields.items()}
 
 
 # Cap on simultaneous in-flight requests per bulk lookup, so a large ID list
@@ -699,12 +702,14 @@ async def get_order_detail(order_ids: list[int]) -> ToolResult:
     return await _gather_by_id(order_ids, (await get_client()).orders.get_detail)
 
 
-def _format_tracking(tracking: DeliveryTracking) -> dict[str, Any]:
+def _format_tracking(tracking: DeliveryTracking, tz: tzinfo) -> dict[str, Any]:
     """Flatten a ``DeliveryTracking`` model into a compact, JSON-ready dict.
 
-    The raw coordinates of the courier and of the delivery address are left out:
-    a straight-line distance answers "how far away is it" without putting
-    location data into the conversation.
+    Times are converted to ``tz``, the shop's timezone. The raw coordinates of
+    the courier and of the delivery address are left out: a straight-line
+    distance answers "how far away is it" without putting location data into
+    the conversation. The courier's first name is kept, as the shop's own app
+    shows it to the customer.
     """
     progress = tracking.progress
     distance = tracking.courier_distance
@@ -727,7 +732,8 @@ def _format_tracking(tracking: DeliveryTracking) -> dict[str, Any]:
             "early_delivery_available": tracking.early_delivery_available,
             "early_delivery_requested": tracking.early_delivery_requested,
             "early_delivery_allowed_from": tracking.early_delivery_allowed_from,
-        }
+        },
+        tz,
     )
 
 
@@ -745,29 +751,36 @@ async def track_delivery(order_id: int | None = None) -> ToolResult:
     -> ``DELIVERED``; ``status`` is ``null`` until the order is queued for a
     courier. The data changes minute by minute, so fetch fresh when asked.
 
+    All times are in the shop's local time (``timezone`` in the result).
+    ``courier_distance_m`` is a straight-line distance from the courier's last
+    reported position; when ``courier_location_stale`` is true that position is
+    outdated, so do not present the distance as current.
+
     Args:
         order_id: The order to track. Omit to track the next upcoming order.
     """
+    if order_id is not None and order_id < 0:
+        return {"error": "Invalid order_id: it must not be negative."}
     orders = (await get_client()).orders
+    timezone_name = read_shop(get_config()).timezone
+    tz = ZoneInfo(timezone_name)
     try:
         if order_id is not None:
             tracking = await orders.get_delivery_tracking(order_id, raise_on_error=True)
             if tracking is None:
                 return f"The shop has no delivery tracking for order {order_id}."
-            return _format_tracking(tracking)
+            return {"timezone": timezone_name, **_format_tracking(tracking, tz)}
 
         nxt = await orders.get_next_delivery()
     except RohlikAPIError as err:
         return {"error": str(err)}
-    except (TypeError, ValueError) as err:
-        # An invalid order ID, rejected by the endpoint builder.
-        return {"error": f"Invalid order_id: {err}"}
 
     if nxt is None:
         return "There is no upcoming order to track."
     order = nxt.order
     return _serialize_fields(
         {
+            "timezone": timezone_name,
             "order_id": order.id,
             "eta": nxt.eta,
             "eta_source": nxt.eta_source,
@@ -782,8 +795,9 @@ async def track_delivery(order_id: int | None = None) -> ToolResult:
                 "total_price": order.total_price,
                 "currency": order.currency,
             },
-            "tracking": _format_tracking(nxt.tracking) if nxt.tracking is not None else None,
-        }
+            "tracking": _format_tracking(nxt.tracking, tz) if nxt.tracking is not None else None,
+        },
+        tz,
     )
 
 
