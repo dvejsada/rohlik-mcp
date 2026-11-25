@@ -150,7 +150,7 @@ do.
 
 ## 🧰 What it can do
 
-**26 tools**, grouped by what they touch. Lookups that take an ID accept a
+**28 tools**, grouped by what they touch. Lookups that take an ID accept a
 **list** of IDs and run in one call — fewer round-trips, same result. Most by-ID
 lookups return a map of **ID → result** (the IDs are JSON object keys, so always
 strings, e.g. `"123"`; an ID is `null` when nothing was found for it). The
@@ -196,6 +196,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | `get_delivery_addresses` | Saved delivery addresses |
 | `get_next_delivery_slots` | Next available delivery slots |
 | `get_timeslot_reservation` | Your currently reserved slot |
+| `track_delivery` | Live tracking: status, courier ETA, stops before yours, courier distance |
 | `get_delivery_announcements` | Delivery announcements incl. the live delivery-time ETA |
 
 ### 👤 Account

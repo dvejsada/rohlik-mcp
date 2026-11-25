@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +29,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult as FastMCPToolResult
-from rohlik_api import RohlikAPI, RohlikAPIError
+from rohlik_api import DeliveryTracking, RohlikAPI, RohlikAPIError
 
 from .config import PASSWORD_HEADER, USERNAME_HEADER, Credentials, ServerConfig
 
@@ -654,6 +655,95 @@ async def get_order_detail(order_ids: list[int]) -> ToolResult:
     Returns a map of order ID to its detail (``null`` when unavailable).
     """
     return await _gather_by_id(order_ids, (await get_client()).orders.get_detail)
+
+
+def _iso(value: datetime | None) -> str | None:
+    """Render an aware datetime as ISO 8601, keeping its UTC offset."""
+    return value.isoformat() if value is not None else None
+
+
+def _format_tracking(tracking: DeliveryTracking) -> dict[str, Any]:
+    """Flatten a ``DeliveryTracking`` model into a compact, JSON-ready dict.
+
+    The raw coordinates of the courier and of the delivery address are left out:
+    a straight-line distance answers "how far away is it" without putting
+    location data into the conversation.
+    """
+    progress = tracking.progress
+    distance = tracking.courier_distance
+    return {
+        "order_id": tracking.order_id,
+        "status": tracking.status,
+        "is_active": tracking.is_active,
+        "has_arrived": tracking.has_arrived,
+        "is_delivered": tracking.is_delivered,
+        "estimated_arrival": _iso(tracking.estimated_arrival),
+        "stops_before": tracking.stops_before,
+        "courier_name": tracking.courier_name,
+        "courier_distance_m": round(distance) if distance is not None else None,
+        "courier_location_stale": progress.courier_location_stale if progress else None,
+        "generated_at": _iso(progress.generated_at) if progress else None,
+        "slot_since": _iso(tracking.slot_since),
+        "slot_till": _iso(tracking.slot_till),
+        "slot_type": tracking.slot_type,
+        "early_delivery_available": tracking.early_delivery_available,
+        "early_delivery_requested": tracking.early_delivery_requested,
+        "early_delivery_allowed_from": _iso(tracking.early_delivery_allowed_from),
+    }
+
+
+@mcp.tool()
+async def track_delivery(order_id: int | None = None) -> ToolResult:
+    """Track a delivery live: status, courier ETA, stops before yours and courier distance.
+
+    With no ``order_id`` this tracks the soonest upcoming order and also returns
+    a resolved ``eta`` (the courier estimate, never earlier than the slot start
+    while the order is still queued; the slot start when there is no estimate).
+    Pass an ``order_id`` to keep following an order after it drops off the
+    upcoming list, e.g. to see it reach ``DELIVERED``.
+
+    Statuses run ``IN_QUEUE`` -> ``ON_THE_WAY`` -> ``ARRIVED`` -> ``HANDING_OVER``
+    -> ``DELIVERED``; ``status`` is ``null`` until the order is queued for a
+    courier. The data changes minute by minute, so fetch fresh when asked.
+
+    Args:
+        order_id: The order to track. Omit to track the next upcoming order.
+    """
+    orders = (await get_client()).orders
+    try:
+        if order_id is not None:
+            tracking = await orders.get_delivery_tracking(order_id, raise_on_error=True)
+            if tracking is None:
+                return f"Rohlik.cz has no delivery tracking for order {order_id}."
+            return _format_tracking(tracking)
+
+        nxt = await orders.get_next_delivery()
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+    except (TypeError, ValueError) as err:
+        # An invalid order ID, rejected by the endpoint builder.
+        return {"error": f"Invalid order_id: {err}"}
+
+    if nxt is None:
+        return "There is no upcoming order to track."
+    order = nxt.order
+    return {
+        "order_id": order.id,
+        "eta": _iso(nxt.eta),
+        "eta_source": nxt.eta_source,
+        "eta_capped": nxt.eta_capped,
+        "status": nxt.status,
+        "order": {
+            "slot_since": _iso(order.slot_since),
+            "slot_till": _iso(order.slot_till),
+            "slot_type": order.slot_type,
+            "order_time": _iso(order.order_time),
+            "items_count": order.items_count,
+            "total_price": order.total_price,
+            "currency": order.currency,
+        },
+        "tracking": _format_tracking(nxt.tracking) if nxt.tracking is not None else None,
+    }
 
 
 @mcp.tool()

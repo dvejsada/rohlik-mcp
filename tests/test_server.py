@@ -4,6 +4,7 @@ The tools are exercised directly with a mocked RohlikAPI client, so no network
 access or credentials are required.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,8 +13,11 @@ from rohlik_api import (
     APIRequestFailedError,
     Cart,
     CartItem,
+    DeliveryTracking,
+    NextDelivery,
     ProductCard,
     ProductComposition,
+    UpcomingOrder,
 )
 
 from rohlik_mcp import server
@@ -48,6 +52,7 @@ class TestSerialize:
             "price": 20.0,
             "category_name": "",
             "brand": "",
+            "currency": "",
         }
 
     def test_list_of_dataclasses(self):
@@ -364,3 +369,78 @@ class TestServerMetadata:
         async with Client(server.mcp) as client:
             result = await client.call_tool("get_cart", {})
         assert result.data["total_price"] == 12.5
+
+
+_TRACKING_PAYLOAD = {
+    "orderId": 777,
+    "deliverySlot": {
+        "since": "2026-11-24T13:00:00.000+0100",
+        "till": "2026-11-24T14:00:00.000+0100",
+        "type": "ON_TIME",
+    },
+    "earlyDelivery": {"available": True, "requested": False},
+    "courier": {"displayName": "Petr"},
+    "destination": {"latitude": 50.0755, "longitude": 14.4378},
+    "progress": {
+        "deliveryStatus": "ON_THE_WAY",
+        "generatedAt": "2026-11-24T12:20:00Z",
+        "estimatedArrival": "2026-11-24T12:40:00Z",
+        "stopsBefore": 2,
+        "courierLocationStale": False,
+        "courierPosition": {"latitude": 50.0855, "longitude": 14.4378},
+    },
+}
+
+
+class TestTrackDelivery:
+    async def test_by_order_id_hides_coordinates(self, mock_client):
+        tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+        result = await server.track_delivery(order_id=777)
+        mock_client.orders.get_delivery_tracking.assert_awaited_once_with(777, raise_on_error=True)
+        assert result["status"] == "ON_THE_WAY"
+        assert result["is_active"] is True
+        assert result["stops_before"] == 2
+        assert result["estimated_arrival"] == "2026-11-24T12:40:00+00:00"
+        assert result["slot_since"] == "2026-11-24T13:00:00+01:00"
+        # ~0.01 degrees of latitude is ~1.1 km.
+        assert 1000 < result["courier_distance_m"] < 1200
+        assert "50.0755" not in json.dumps(result)
+        assert "latitude" not in json.dumps(result)
+
+    async def test_by_order_id_without_tracking(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=None)
+        result = await server.track_delivery(order_id=5)
+        assert "no delivery tracking" in result
+
+    async def test_next_delivery(self, mock_client):
+        order = UpcomingOrder.from_api(
+            {
+                "id": 777,
+                "deliverySlot": {"since": "2026-11-24T13:00:00.000+0100", "type": "ON_TIME"},
+                "priceComposition": {"total": {"amount": 999.0, "currency": "CZK"}},
+            }
+        )
+        assert order is not None
+        nxt = NextDelivery.resolve(order, DeliveryTracking.from_api(_TRACKING_PAYLOAD))
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=nxt)
+        result = await server.track_delivery()
+        assert result["order_id"] == 777
+        assert result["eta_source"] == "tracking"
+        assert result["order"]["currency"] == "CZK"
+        assert result["tracking"]["status"] == "ON_THE_WAY"
+        json.dumps(result)  # fully JSON-serialisable
+
+    async def test_no_upcoming_order(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=None)
+        assert "no upcoming order" in await server.track_delivery()
+
+    async def test_api_error_is_reported(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(side_effect=APIRequestFailedError("boom"))
+        assert await server.track_delivery() == {"error": "boom"}
+
+    async def test_registered_and_callable_over_mcp(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=None)
+        async with Client(server.mcp) as client:
+            result = await client.call_tool("track_delivery", {})
+        assert "no upcoming order" in result.content[0].text
