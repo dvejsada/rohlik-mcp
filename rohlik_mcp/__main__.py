@@ -2,7 +2,7 @@
 
 Runs the server using the Streamable HTTP transport, suitable for running as a
 long-lived service (e.g. in a Docker container). Bind settings are read from the
-environment (see :mod:`rohlik_mcp.config`); Rohlik.cz credentials are not — each
+environment (see :mod:`rohlik_mcp.config`); shop credentials are not — each
 client supplies its own with every request.
 """
 

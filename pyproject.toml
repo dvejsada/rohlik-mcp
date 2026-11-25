@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=77.0", "wheel"]
+requires = ["setuptools>=80.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "rohlik-mcp"
 dynamic = ["version"]
-description = "Model Context Protocol (MCP) server for the Rohlik.cz API"
+description = "Model Context Protocol (MCP) server for the Rohlik.cz API (also Knuspr.de, Gurkerl.at, Kifli.hu and Sezamo.ro)"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
@@ -26,17 +26,19 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "fastmcp>=3.0.0",
-    "rohlik-api>=0.2.0",
+    "fastmcp>=4.2.6,<5",
+    "rohlik-api>=0.5.0,<0.6",
+    # IANA timezones for zoneinfo on systems without a system database.
+    "tzdata>=2026.6",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "black>=24.0.0",
-    "ruff>=0.6.0",
-    "mypy>=1.11.0",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "black>=26.10.1",
+    "ruff>=0.17.6",
+    "mypy>=2.4.1",
 ]
 
 [project.scripts]
@@ -92,6 +94,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
     "--strict-markers",
     "--strict-config",

@@ -1,17 +1,21 @@
-"""MCP server exposing the Rohlik.cz API as tools.
+"""MCP server exposing the Rohlík Group shop API as tools.
 
+Rohlík.cz, Knuspr.de, Gurkerl.at, Kifli.hu and Sezamo.ro run the same API.
 Credentials are supplied **per request** by the calling client, as the
-``X-Rohlik-Username`` / ``X-Rohlik-Password`` headers, so one server can serve
-many accounts (see :mod:`rohlik_mcp.config`). A :class:`~rohlik_api.RohlikAPI`
-client is created per account and cached, keyed by a hash of the credentials, so
-successive tool calls from one user reuse a single logged-in session. Idle
-clients are logged out and closed by a background reaper.
+``X-Rohlik-Username`` / ``X-Rohlik-Password`` headers, plus an optional
+``X-Rohlik-Site`` header choosing the shop, so one server can serve many
+accounts (see :mod:`rohlik_mcp.config`). A :class:`~rohlik_api.RohlikAPI`
+client is created per account and shop and cached, keyed by a hash of the
+credentials and the shop URL, so successive tool calls from one user reuse a
+single logged-in session. Idle clients are logged out and closed by a
+background reaper.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections import OrderedDict
@@ -19,8 +23,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime, tzinfo
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
+from zoneinfo import ZoneInfo
 
 import mcp.types as mt
 from fastmcp import FastMCP
@@ -28,9 +34,25 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult as FastMCPToolResult
-from rohlik_api import RohlikAPI, RohlikAPIError
+from rohlik_api import (
+    Cart,
+    DeliveryTracking,
+    NextDelivery,
+    RohlikAPI,
+    RohlikAPIError,
+    Site,
+    UpcomingOrder,
+)
 
-from .config import PASSWORD_HEADER, USERNAME_HEADER, Credentials, ServerConfig
+from .config import (
+    PASSWORD_HEADER,
+    SITE_HEADER,
+    USERNAME_HEADER,
+    Credentials,
+    InvalidSiteError,
+    ServerConfig,
+    resolve_shop,
+)
 
 if TYPE_CHECKING:
     from fastmcp.server.auth import StaticTokenVerifier
@@ -41,7 +63,7 @@ _LOGGER = logging.getLogger(__name__)
 ToolResult = dict[str, Any] | list[Any] | str | None
 
 _MISSING_CREDENTIALS_MESSAGE = (
-    "No Rohlik.cz credentials were supplied. This server takes them per request, "
+    "No shop login credentials were supplied. This server takes them per request, "
     f"as the {USERNAME_HEADER} and {PASSWORD_HEADER} headers - set them in your "
     "MCP client's settings for this server."
 )
@@ -113,7 +135,7 @@ def get_config() -> ServerConfig:
 
 
 def read_credentials() -> Credentials:
-    """Read the caller's Rohlik.cz credentials from the current request headers.
+    """Read the caller's shop credentials from the current request headers.
 
     Raises:
         ToolError: If either header is missing or empty. A ``ToolError`` message
@@ -127,6 +149,19 @@ def read_credentials() -> Credentials:
     if not username or not password:
         raise ToolError(_MISSING_CREDENTIALS_MESSAGE)
     return Credentials(username=username, password=password)
+
+
+def read_shop(config: ServerConfig) -> Site:
+    """Return the shop the current request is for (``X-Rohlik-Site``, else the default).
+
+    Raises:
+        ToolError: If the header names an unknown shop, or one this server
+            cannot serve because ``ROHLIK_BASE_URL`` pins it to one URL.
+    """
+    try:
+        return resolve_shop(config, get_http_headers().get(SITE_HEADER))
+    except InvalidSiteError as err:
+        raise ToolError(str(err)) from err
 
 
 async def _close_account_client(entry: _AccountClient) -> None:
@@ -175,12 +210,14 @@ async def get_client() -> RohlikAPI:
     a single login rather than one per call.
 
     Raises:
-        ToolError: If credentials are missing from the request, or Rohlik.cz
-            rejects them.
+        ToolError: If credentials are missing from the request, the requested
+            shop is unknown, or the shop rejects the credentials.
     """
     config = get_config()
     credentials = read_credentials()
-    key = credentials.cache_key(config.base_url)
+    shop = read_shop(config)
+    # The URL is part of the key, so one email on two shops gets two sessions.
+    key = credentials.cache_key(shop.base_url)
 
     async with _registry_lock:
         entry = _clients.get(key)
@@ -190,7 +227,7 @@ async def get_client() -> RohlikAPI:
                 client=RohlikAPI(
                     username=credentials.username,
                     password=credentials.password,
-                    base_url=config.base_url,
+                    base_url=shop.base_url,
                     timeout=config.timeout,
                     auto_login=False,
                 )
@@ -220,7 +257,7 @@ async def get_client() -> RohlikAPI:
                     if _clients.get(key) is entry:
                         del _clients[key]
                 _schedule_close(entry)
-                raise ToolError(f"Rohlik.cz login failed: {err}") from err
+                raise ToolError(f"{shop.name} login failed: {err}") from err
 
     entry.last_used = time.monotonic()
     return entry.client
@@ -264,12 +301,23 @@ async def _close_all_clients() -> None:
         await asyncio.gather(*list(_pending_closes), return_exceptions=True)
 
 
-def _serialize(obj: Any) -> Any:
-    """Recursively convert dataclass models into JSON-serialisable structures."""
+def _serialize(obj: Any, tz: tzinfo | None = None) -> Any:
+    """Recursively convert API results into JSON-serialisable structures.
+
+    Dataclass models become dicts, and every ``datetime`` at any depth becomes
+    an ISO 8601 string with its UTC offset (the typed models' timestamps are
+    timezone-aware). With ``tz``, each is first converted to that timezone, so
+    one result never mixes UTC and local times. Timestamps inside raw API
+    payloads are strings already and pass through in the shop's own format.
+    """
     if is_dataclass(obj) and not isinstance(obj, type):
-        return asdict(obj)
-    if isinstance(obj, list):
-        return [_serialize(item) for item in obj]
+        obj = asdict(obj)
+    if isinstance(obj, datetime):
+        return (obj.astimezone(tz) if tz is not None else obj).isoformat()
+    if isinstance(obj, dict):
+        return {key: _serialize(value, tz) for key, value in obj.items()}
+    if isinstance(obj, list | tuple):
+        return [_serialize(item, tz) for item in obj]
     return obj
 
 
@@ -288,6 +336,11 @@ async def _call(coro: Awaitable[Any]) -> ToolResult:
     if result is None:
         return "No data available (the request returned nothing or failed)."
     return result
+
+
+def _serialize_fields(fields: dict[str, Any], tz: tzinfo | None = None) -> dict[str, Any]:
+    """Serialise each value of a dict built by a tool (see :func:`_serialize`)."""
+    return {key: _serialize(value, tz) for key, value in fields.items()}
 
 
 # Cap on simultaneous in-flight requests per bulk lookup, so a large ID list
@@ -402,9 +455,11 @@ def _build_auth() -> StaticTokenVerifier | None:
 mcp = FastMCP(
     "rohlik",
     instructions=(
-        "Tools for the Rohlik.cz online grocery service: search products and "
-        "recipes, inspect prices/composition, manage the shopping cart and read "
-        "orders and delivery information for the authenticated account."
+        "Tools for the Rohlík Group online grocery shops (Rohlík.cz, Knuspr.de, "
+        "Gurkerl.at, Kifli.hu, Sezamo.ro): search products and recipes, inspect "
+        "prices/composition, manage the shopping cart and read orders and delivery "
+        "information for the authenticated account. Each user's account is on one "
+        "shop; prices are in that shop's currency (see get_account_overview)."
     ),
     lifespan=_lifespan,
     auth=_build_auth(),
@@ -518,10 +573,54 @@ async def get_weekly_sales(size: int = 30) -> ToolResult:
 # ---------------------------------------------------------------------------
 
 
+def _shop_tz(shop: Site) -> ZoneInfo:
+    """Return the shop's timezone, for rendering the typed models' times locally."""
+    return ZoneInfo(shop.timezone)
+
+
+def _cart_fields(cart: Cart, shop: Site) -> dict[str, Any]:
+    """Serialise a cart and add how far it is from the shop's minimum order.
+
+    ``remaining_to_minimum`` is ``0`` once the total reaches the minimum, and
+    ``null`` when it cannot be worked out: no minimum is reported, the minimum
+    is ``0`` (what the shop reports for an anonymous cart, so not a real
+    minimum), or either amount is not a number. ``currency`` falls back to the
+    shop's when the cart has no items to take it from.
+    """
+    fields: dict[str, Any] = _serialize(cart)
+    fields["currency"] = cart.currency or shop.currency
+    minimum, total = cart.minimum_order_price, cart.total_price
+    remaining: float | None = None
+    # The model does not validate types, so a malformed payload must give
+    # "unknown" here rather than a TypeError.
+    if _is_number(minimum) and _is_number(total) and minimum > 0:
+        remaining = round(max(0.0, minimum - total), 2)
+    fields["remaining_to_minimum"] = remaining
+    return fields
+
+
+def _is_number(value: object) -> TypeGuard[float]:
+    """Whether ``value`` is a finite int or float (``bool`` is not a number here)."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
 @mcp.tool()
 async def get_cart() -> ToolResult:
-    """Get the current shopping cart contents and total price."""
-    return await _call((await get_client()).cart.get_content())
+    """Get the current shopping cart: items, total price and currency.
+
+    Also returns the shop's ``minimum_order_price`` and ``remaining_to_minimum``,
+    the amount still needed before an order can be placed (``0`` once reached,
+    ``null`` when the shop reports no usable minimum - then say it is unknown).
+    ``can_make_order`` covers more than the minimum (e.g. a chosen delivery
+    slot), so use ``remaining_to_minimum`` to answer "is my cart big enough?".
+    """
+    client = await get_client()
+    shop = read_shop(get_config())
+    try:
+        cart = await client.cart.get_content()
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+    return _cart_fields(cart, shop)
 
 
 @mcp.tool()
@@ -533,7 +632,13 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
             ``quantity`` defaults to 1 when omitted. Pass a single-entry list to
             add just one product.
 
-    Returns the product IDs that were successfully added and any that failed.
+    Returns the product IDs that were successfully added and any that failed,
+    plus a ``cart`` summary afterwards: ``total_price``, ``currency``,
+    ``minimum_order_price`` and ``remaining_to_minimum`` (the amount still
+    needed to reach the shop's minimum order; ``0`` once reached, ``null`` when
+    unknown). The summary is an ``{"error": ...}`` if the cart could not be read
+    back; ``added`` and ``failed`` are still accurate, so do not re-add ``added``.
+    An empty ``items`` list changes nothing and returns no summary.
     """
     if not items:
         return {"added": [], "failed": []}
@@ -548,14 +653,37 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
         }
 
     requested = [entry["product_id"] for entry in payload]
-    added = await _call((await get_client()).cart.add_items(payload))
+    client = await get_client()
+    added = await _call(client.cart.add_items(payload))
     if not isinstance(added, list):
         # _call returned an error payload (or "no data") — surface it unchanged
         # instead of masking it as every item having failed.
         return added
+
+    # One extra request, so the model can say how far the cart is from the
+    # minimum order without a separate get_cart call.
+    summary: dict[str, Any]
+    try:
+        cart = _cart_fields(await client.cart.get_content(), read_shop(get_config()))
+    except Exception as err:  # noqa: BLE001 - the add already happened
+        # Whatever went wrong here, added/failed below are still accurate; say
+        # so, or the model may retry and add the items twice. (A shop outage
+        # can fail every add *and* the read-back, so do not claim anything was
+        # added.)
+        _LOGGER.warning("Cart read-back after add_to_cart failed: %r", err)
+        summary = {
+            "error": f"The cart could not be read back ({err}); "
+            "'added' and 'failed' are still accurate."
+        }
+    else:
+        summary = {
+            key: cart[key]
+            for key in ("total_price", "currency", "minimum_order_price", "remaining_to_minimum")
+        }
     return {
         "added": added,
         "failed": [pid for pid in requested if pid not in added],
+        "cart": summary,
     }
 
 
@@ -625,8 +753,26 @@ async def get_ingredient_products(
 
 @mcp.tool()
 async def get_next_order() -> ToolResult:
-    """Get the next upcoming order."""
-    return await _call((await get_client()).orders.get_next())
+    """Get the upcoming (not yet delivered) orders, soonest delivery first.
+
+    Each has its ``id``, delivery slot, order time, item count, total price and
+    currency; times are in the shop's timezone. For an order's line items use
+    ``get_order_detail``; for when it will arrive use ``track_delivery``.
+    """
+    client = await get_client()
+    tz = _shop_tz(read_shop(get_config()))
+    try:
+        orders = await client.orders.get_upcoming()
+    except RohlikAPIError as err:
+        # Reads return None on failure, but a failed re-login after a 401 raises.
+        return {"error": str(err)}
+    if orders is None:
+        return {"error": "Cannot fetch upcoming orders."}
+    if not orders:
+        # A sentence, not [], which some clients would show as no output at all.
+        return "There is no upcoming order."
+    serialized: list[Any] = _serialize(orders, tz)
+    return serialized
 
 
 @mcp.tool()
@@ -654,6 +800,111 @@ async def get_order_detail(order_ids: list[int]) -> ToolResult:
     Returns a map of order ID to its detail (``null`` when unavailable).
     """
     return await _gather_by_id(order_ids, (await get_client()).orders.get_detail)
+
+
+def _format_tracking(tracking: DeliveryTracking, tz: tzinfo) -> dict[str, Any]:
+    """Flatten a ``DeliveryTracking`` model into a compact, JSON-ready dict.
+
+    Times are converted to ``tz``, the shop's timezone. The raw coordinates of
+    the courier and of the delivery address are left out: a straight-line
+    distance answers "how far away is it" without putting location data into
+    the conversation. The courier's first name is kept, as the shop's own app
+    shows it to the customer.
+    """
+    progress = tracking.progress
+    distance = tracking.courier_distance
+    return _serialize_fields(
+        {
+            "order_id": tracking.order_id,
+            "status": tracking.status,
+            "is_active": tracking.is_active,
+            "has_arrived": tracking.has_arrived,
+            "is_delivered": tracking.is_delivered,
+            "estimated_arrival": tracking.estimated_arrival,
+            "stops_before": tracking.stops_before,
+            "courier_name": tracking.courier_name,
+            "courier_distance_m": round(distance) if distance is not None else None,
+            "courier_location_stale": progress.courier_location_stale if progress else None,
+            "generated_at": progress.generated_at if progress else None,
+            "slot_since": tracking.slot_since,
+            "slot_till": tracking.slot_till,
+            "slot_type": tracking.slot_type,
+            "early_delivery_available": tracking.early_delivery_available,
+            "early_delivery_requested": tracking.early_delivery_requested,
+            "early_delivery_allowed_from": tracking.early_delivery_allowed_from,
+        },
+        tz,
+    )
+
+
+@mcp.tool()
+async def track_delivery(order_id: int | None = None) -> ToolResult:
+    """Track a delivery live: status, courier ETA, stops before yours and courier distance.
+
+    With no ``order_id`` this tracks the soonest upcoming order and also returns
+    a resolved ``eta`` (the courier estimate, never earlier than the slot start
+    while the order is still queued; the slot start when there is no estimate).
+    Pass an ``order_id`` to keep following an order after it drops off the
+    upcoming list, e.g. to see it reach ``DELIVERED``.
+
+    Statuses run ``IN_QUEUE`` -> ``ON_THE_WAY`` -> ``ARRIVED`` -> ``HANDING_OVER``
+    -> ``DELIVERED``; ``status`` is ``null`` until the order is queued for a
+    courier. The data changes minute by minute, so fetch fresh when asked.
+
+    All times are in the shop's local time (``timezone`` in the result).
+    ``courier_distance_m`` is a straight-line distance from the courier's last
+    reported position; when ``courier_location_stale`` is true that position is
+    outdated, so do not present the distance as current.
+
+    Args:
+        order_id: The order to track. Omit to track the next upcoming order.
+    """
+    if order_id is not None and order_id < 0:
+        return {"error": "Invalid order_id: it must not be negative."}
+    orders = (await get_client()).orders
+    shop = read_shop(get_config())
+    timezone_name = shop.timezone
+    tz = _shop_tz(shop)
+    try:
+        if order_id is not None:
+            tracking = await orders.get_delivery_tracking(order_id, raise_on_error=True)
+            if tracking is None:
+                return f"The shop has no delivery tracking for order {order_id}."
+            return {"timezone": timezone_name, **_format_tracking(tracking, tz)}
+
+        nxt = await orders.get_next_delivery()
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+
+    if nxt is None:
+        return "There is no upcoming order to track."
+    return _format_next_delivery(nxt, tz, timezone_name)
+
+
+def _format_next_delivery(nxt: NextDelivery, tz: tzinfo, timezone_name: str) -> dict[str, Any]:
+    """Flatten a ``NextDelivery`` into a compact dict, times in the shop's ``tz``."""
+    order = nxt.order
+    return _serialize_fields(
+        {
+            "timezone": timezone_name,
+            "order_id": order.id,
+            "eta": nxt.eta,
+            "eta_source": nxt.eta_source,
+            "eta_capped": nxt.eta_capped,
+            "status": nxt.status,
+            "order": {
+                "slot_since": order.slot_since,
+                "slot_till": order.slot_till,
+                "slot_type": order.slot_type,
+                "order_time": order.order_time,
+                "items_count": order.items_count,
+                "total_price": order.total_price,
+                "currency": order.currency,
+            },
+            "tracking": _format_tracking(nxt.tracking, tz) if nxt.tracking is not None else None,
+        },
+        tz,
+    )
 
 
 @mcp.tool()
@@ -709,42 +960,88 @@ async def get_shopping_list(shopping_list_ids: list[str]) -> ToolResult:
 async def get_account_overview() -> ToolResult:
     """Get a trimmed one-call snapshot of the account.
 
-    Combines delivery info, the next and last orders, cart contents, premium
-    profile, reusable-bags info, announcements (account and delivery, the
-    latter carrying the delivery-time ETA), the reserved timeslot and the
-    next available delivery slot in a single call. The full delivered-order
-    history is excluded — use ``get_delivered_orders`` for that. Prefer the
-    specific tools when only one piece of information is needed.
+    Starts with the ``shop`` the account is on (name, currency, timezone), then
+    combines delivery info, the upcoming orders, the ``next_delivery`` (the
+    soonest order's live status and resolved ETA, as ``track_delivery`` gives
+    it; ``null`` with no upcoming order), the last order, the cart (with
+    ``remaining_to_minimum``), premium profile, reusable-bags info, account
+    announcements, the reserved timeslot and the next available delivery slot
+    in a single call. The full delivered-order history is excluded — use
+    ``get_delivered_orders`` for that. Prefer the specific tools when only one
+    piece of information is needed.
     """
     client = await get_client()
+    shop = read_shop(get_config())
+    tz = _shop_tz(shop)
     sections: list[tuple[str, Awaitable[Any]]] = [
         ("delivery", client.delivery.get_info()),
-        ("next_order", client.orders.get_next()),
+        ("upcoming_orders", client.orders.get_upcoming()),
         ("last_order", client.orders.get_last()),
         ("cart", client.cart.get_content()),
         ("premium_profile", client.account.get_premium_profile()),
         ("bags", client.account.get_bags_info()),
         ("announcements", client.account.get_announcements()),
-        ("delivery_announcements", client.delivery.get_announcements()),
         ("timeslot", client.delivery.get_timeslot_reservation()),
         ("next_delivery_slot", client.delivery.get_next_slots()),
     ]
     names = [name for name, _ in sections]
     results = await asyncio.gather(*(coro for _, coro in sections), return_exceptions=True)
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {
+        "shop": {
+            "code": shop.code,
+            "name": shop.name,
+            "currency": shop.currency,
+            "timezone": shop.timezone,
+        }
+    }
+    upcoming: list[UpcomingOrder] | None = None
     for name, result in zip(names, results, strict=True):
         if isinstance(result, RohlikAPIError):
             out[name] = {"error": str(result)}
         elif isinstance(result, BaseException):
             raise result
+        elif name == "upcoming_orders" and result is None:
+            out[name] = {"error": "Cannot fetch upcoming orders."}
+        elif name == "upcoming_orders":
+            upcoming = result
+            out[name] = _serialize(result, tz)
+        elif name == "cart":
+            out[name] = _cart_fields(result, shop)
         else:
-            out[name] = _serialize(result)
+            out[name] = _serialize(result, tz)
+
+    if upcoming is None:
+        out["next_delivery"] = {"error": "Upcoming orders unavailable, so no delivery to track."}
+    else:
+        out["next_delivery"] = await _next_delivery_for(client, upcoming, tz, shop.timezone)
     return out
+
+
+async def _next_delivery_for(
+    client: RohlikAPI, upcoming: list[UpcomingOrder], tz: tzinfo, timezone_name: str
+) -> dict[str, Any] | None:
+    """Track the soonest of ``upcoming`` (already fetched) and resolve its ETA.
+
+    This is ``orders.get_next_delivery`` without its second fetch of the
+    upcoming orders: one request, and none when there is no upcoming order.
+    """
+    if not upcoming:
+        return None
+    order = upcoming[0]
+    try:
+        tracking = await client.orders.get_delivery_tracking(order.id, raise_on_error=True)
+    except RohlikAPIError as err:
+        return {"error": str(err)}
+    try:
+        nxt = NextDelivery.resolve(order, tracking)
+    except ValueError as err:
+        return {"error": f"Inconsistent delivery tracking: {err}"}
+    return _format_next_delivery(nxt, tz, timezone_name)
 
 
 @mcp.tool()
 async def get_premium_profile() -> ToolResult:
-    """Get the premium (Rohlik membership) profile for the account."""
+    """Get the premium (membership) profile for the account."""
     return await _call((await get_client()).account.get_premium_profile())
 
 

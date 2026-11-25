@@ -1,6 +1,7 @@
 # 🛒 Rohlik MCP Server
 
 **Do your Rohlik.cz grocery shopping by just talking to your AI assistant.**
+Works with the sister shops too: Knuspr.de, Gurkerl.at, Kifli.hu and Sezamo.ro.
 
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-georgx22%2Frohlik--mcp-2496ED.svg?logo=docker&logoColor=white)](https://hub.docker.com/r/georgx22/rohlik-mcp)
@@ -38,7 +39,7 @@ Once it's connected, talk to your assistant naturally:
 ## 🚀 Quick start (Docker)
 
 The server holds **no credentials of its own** — each client sends its own
-Rohlik.cz login with every request, so one server can serve several people:
+shop login with every request, so one server can serve several people:
 
 ```bash
 docker run --rm -p 8000:8000 georgx22/rohlik-mcp
@@ -47,7 +48,7 @@ docker run --rm -p 8000:8000 georgx22/rohlik-mcp
 Your server is now live at **`http://localhost:8000/mcp/`**. That's it. 🎉
 
 > 🔒 **Your credentials never leave your machine.** They travel from your MCP
-> client to your own container, and from there straight to Rohlik.cz. Nothing is
+> client to your own container, and from there straight to the shop. Nothing is
 > stored on disk.
 
 ---
@@ -55,7 +56,7 @@ Your server is now live at **`http://localhost:8000/mcp/`**. That's it. 🎉
 ## 🔌 Connect your MCP client
 
 Point any client that speaks Streamable HTTP at the endpoint, and send your
-Rohlik.cz login as two headers:
+Rohlik.cz login as two headers (for another shop, see [Other shops](#-other-shops)):
 
 ```json
 {
@@ -89,6 +90,32 @@ way that tool documents:
   }
 }
 ```
+
+### 🌍 Other shops
+
+The same server works with every Rohlík Group shop. Add an **`X-Rohlik-Site`**
+header with the shop's code to use your account there:
+
+| Code | Shop | Currency |
+| ---- | ---- | -------- |
+| `cz` | [Rohlík.cz](https://www.rohlik.cz) (default) | CZK |
+| `de` | [Knuspr.de](https://www.knuspr.de) | EUR |
+| `at` | [Gurkerl.at](https://www.gurkerl.at) | EUR |
+| `hu` | [Kifli.hu](https://www.kifli.hu) | HUF |
+| `ro` | [Sezamo.ro](https://www.sezamo.ro) | RON |
+
+```json
+"headers": {
+  "X-Rohlik-Username": "your_email@example.com",
+  "X-Rohlik-Password": "your_password",
+  "X-Rohlik-Site": "de"
+}
+```
+
+Without the header the server uses its default shop, `ROHLIK_SITE` (Rohlík.cz
+unless changed). An account on one shop is not an account on another, so the
+same e-mail on two shops gets two separate sessions. `get_account_overview`
+starts with the shop the call went to and its currency.
 
 The server logs in once per account and reuses that session for every following
 tool call, so a conversation costs one login rather than one per call. A session
@@ -150,7 +177,7 @@ do.
 
 ## 🧰 What it can do
 
-**26 tools**, grouped by what they touch. Lookups that take an ID accept a
+**28 tools**, grouped by what they touch. Lookups that take an ID accept a
 **list** of IDs and run in one call — fewer round-trips, same result. Most by-ID
 lookups return a map of **ID → result** (the IDs are JSON object keys, so always
 strings, e.g. `"123"`; an ID is `null` when nothing was found for it). The
@@ -170,8 +197,8 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 ### 🛒 Cart
 | Tool | What it does |
 | ---- | ------------ |
-| `get_cart` | Current cart contents and total |
-| `add_to_cart` | Add one or more products in one call |
+| `get_cart` | Current cart contents and total, plus how much is still needed to reach the shop's minimum order |
+| `add_to_cart` | Add one or more products in one call; returns the new total and the amount still needed for the minimum order |
 | `remove_from_cart` | Remove one or more items in one call |
 
 ### 👩‍🍳 Recipes (Rohlík Chef)
@@ -184,7 +211,7 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 ### 📦 Orders
 | Tool | What it does |
 | ---- | ------------ |
-| `get_next_order` | Your next upcoming order |
+| `get_next_order` | Your upcoming orders, soonest first: slot, total, item count (compact; use `get_order_detail` for line items) |
 | `get_last_order` | Your most recent delivered order |
 | `get_delivered_orders` | Your order history |
 | `get_order_detail` | Full detail of one or more orders by ID |
@@ -196,32 +223,57 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 | `get_delivery_addresses` | Saved delivery addresses |
 | `get_next_delivery_slots` | Next available delivery slots |
 | `get_timeslot_reservation` | Your currently reserved slot |
+| `track_delivery` | Live tracking: status, courier ETA, stops before yours, courier distance and first name (times in the shop's timezone; coordinates are never returned) |
 | `get_delivery_announcements` | Delivery announcements incl. the live delivery-time ETA |
 
 ### 👤 Account
 | Tool | What it does |
 | ---- | ------------ |
 | `get_shopping_list` | One or more saved shopping lists by ID |
-| `get_account_overview` | Trimmed one-call snapshot: cart, orders, delivery & more |
+| `get_account_overview` | Trimmed one-call snapshot: shop, cart, upcoming orders, next delivery's live ETA & more |
 | `get_premium_profile` | Premium (membership) profile |
 | `get_bags_info` | Reusable shopping bags |
 | `get_announcements` | Account announcements |
 
-> ⚠️ **`add_to_cart` and `remove_from_cart` change your real Rohlik cart.**
+> ⚠️ **`add_to_cart` and `remove_from_cart` change your real shop cart.**
 > Everything else is read-only.
+
+### ⬆️ Upgrading to 0.6.0
+
+Tool names are unchanged, but some results changed shape. Update any prompts or
+automations that read these fields:
+
+- **`get_next_order`** returns a **list** of compact upcoming orders (0.5.0
+  passed the shop's raw response through), soonest first: `id`,
+  `slot_since`/`slot_till`, `order_time`, `items_count`, `total_price`,
+  `currency`. The raw shop fields (`deliverySlot`, `priceComposition`, the
+  address, …) are gone; use `get_order_detail` for full detail. With no upcoming
+  order it returns the sentence "There is no upcoming order.", and a failure is
+  an `{"error": ...}` result.
+- **`get_account_overview`**: `next_order` is now `upcoming_orders`, in the same
+  compact form. `delivery_announcements` is removed; the new `next_delivery`
+  section has the live status and arrival estimate instead (as from
+  `track_delivery`). A `shop` section comes first.
+- **`get_cart`** and the overview's `cart` add `remaining_to_minimum`, and an
+  empty cart's `currency` is the shop's instead of empty;
+  **`add_to_cart`** adds a `cart` summary.
+- **`ROHLIK_BASE_URL`** set to another address than a shop's own now pins the
+  server to its `ROHLIK_SITE` shop (see [Configuration](#️-configuration)).
 
 ---
 
 ## ⚙️ Configuration
 
-Rohlik.cz credentials are **not** configured here — they come from each request's
-`X-Rohlik-Username` / `X-Rohlik-Password` headers. Everything else is environment
+Shop credentials are **not** configured here — they come from each request's
+`X-Rohlik-Username` / `X-Rohlik-Password` headers, with an optional
+`X-Rohlik-Site` header choosing the shop. Everything else is environment
 variables:
 
 | Variable | Default | Description |
 | -------- | ------- | ----------- |
 | `ROHLIK_MCP_AUTH_TOKEN` | — | Bearer token clients must present; auth is disabled when unset |
-| `ROHLIK_BASE_URL` | `https://www.rohlik.cz` | API base URL |
+| `ROHLIK_SITE` | `cz` | Default shop when a request has no `X-Rohlik-Site` header: `cz`, `de`, `at`, `hu` or `ro`. An unknown code stops the server at startup |
+| `ROHLIK_BASE_URL` | — | Advanced: sends every request to this URL (e.g. a proxy) instead of the shop's own. The server then serves only its `ROHLIK_SITE` shop, and a request asking for another is refused. A shop's own address (e.g. `https://www.knuspr.de`, the old way to pick a shop) is read as `ROHLIK_SITE` for that shop instead, with no pin |
 | `ROHLIK_TIMEOUT` | `30` | Request timeout (seconds) |
 | `ROHLIK_MCP_HOST` | `0.0.0.0` | HTTP bind host |
 | `ROHLIK_MCP_PORT` | `8000` | HTTP bind port |
@@ -233,7 +285,7 @@ variables:
 
 ## 🛠️ Running from source
 
-Prefer Python over Docker? You'll need **Python 3.13+** and a Rohlik.cz account.
+Prefer Python over Docker? You'll need **Python 3.13+** and an account on Rohlik.cz or one of its sister shops.
 
 ```bash
 git clone https://github.com/dvejsada/rohlik-mcp
@@ -269,6 +321,6 @@ mypy rohlik_mcp        # type checks
 
 Released under the [MIT License](LICENSE).
 
-> **Unofficial project.** It uses the non-public Rohlik.cz API and is not
-> affiliated with, authorised by, or endorsed by Rohlik.cz. Use at your own
+> **Unofficial project.** It uses the non-public Rohlík Group API and is not
+> affiliated with, authorised by, or endorsed by Rohlík Group or its shops. Use at your own
 > discretion.

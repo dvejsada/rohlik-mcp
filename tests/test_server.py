@@ -4,6 +4,8 @@ The tools are exercised directly with a mocked RohlikAPI client, so no network
 access or credentials are required.
 """
 
+import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,11 +14,24 @@ from rohlik_api import (
     APIRequestFailedError,
     Cart,
     CartItem,
+    DeliveryTracking,
+    NextDelivery,
     ProductCard,
     ProductComposition,
+    UpcomingOrder,
 )
 
 from rohlik_mcp import server
+
+
+@pytest.fixture(autouse=True)
+def clean_config(monkeypatch):
+    """Read the shop settings from a clean environment, not the developer's shell."""
+    monkeypatch.delenv("ROHLIK_SITE", raising=False)
+    monkeypatch.delenv("ROHLIK_BASE_URL", raising=False)
+    server.get_config.cache_clear()
+    yield
+    server.get_config.cache_clear()
 
 
 @pytest.fixture
@@ -38,6 +53,26 @@ def mock_client(monkeypatch):
 
 
 class TestSerialize:
+    def test_datetimes_become_iso_strings_at_any_depth(self):
+        when = datetime(2026, 11, 24, 13, 0, tzinfo=timezone(timedelta(hours=1)))
+        order = UpcomingOrder(
+            id=1,
+            slot_id=None,
+            slot_type=None,
+            slot_since=when,
+            slot_till=None,
+            order_time=None,
+            items_count=None,
+            items_total_quantity=None,
+            total_price=None,
+            currency=None,
+        )
+        result = server._serialize({"orders": [order], "at": (when,)})
+
+        assert result["orders"][0]["slot_since"] == "2026-11-24T13:00:00+01:00"
+        assert result["at"] == ["2026-11-24T13:00:00+01:00"]
+        json.dumps(result)
+
     def test_dataclass_to_dict(self):
         item = CartItem(id="1", cart_item_id="f1", name="Milk", quantity=2, price=20.0)
         assert server._serialize(item) == {
@@ -48,6 +83,7 @@ class TestSerialize:
             "price": 20.0,
             "category_name": "",
             "brand": "",
+            "currency": "",
         }
 
     def test_list_of_dataclasses(self):
@@ -159,17 +195,115 @@ class TestCartTools:
         result = await server.get_cart()
         assert result["total_price"] == 99.9
         assert result["total_items"] == 1
+        # No minimum reported, no items to take a currency from: the shop's.
+        assert result["remaining_to_minimum"] is None
+        assert result["currency"] == "CZK"
+
+    @pytest.mark.parametrize(
+        ("total", "minimum", "remaining"),
+        [
+            (512.3, 1000.0, 487.7),
+            (1000.0, 1000.0, 0.0),
+            (1500.0, 1000.0, 0.0),
+            # An anonymous cart reports a minimum of 0: unknown, not "big enough".
+            (5.0, 0.0, None),
+            # Malformed amounts give "unknown" instead of crashing.
+            (None, 1000.0, None),
+            (500.0, "1000", None),
+            (500.0, True, None),
+            (float("nan"), 1000.0, None),
+            (500.0, float("inf"), None),
+        ],
+    )
+    async def test_get_cart_remaining_to_minimum(self, mock_client, total, minimum, remaining):
+        mock_client.cart.get_content = AsyncMock(
+            return_value=Cart(
+                total_price=total,
+                total_items=1,
+                can_make_order=False,
+                products=[],
+                minimum_order_price=minimum,
+                currency="EUR",
+            )
+        )
+        result = await server.get_cart()
+        assert result["remaining_to_minimum"] == remaining
+        assert result["minimum_order_price"] == minimum
+        assert result["currency"] == "EUR"
+
+    async def test_malformed_cart_does_not_break_the_overview(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_content=AsyncMock(
+                return_value=Cart.from_api({"data": {"totalPrice": None, "minimalOrderPrice": 749}})
+            ),
+            get_info=AsyncMock(return_value={"d": 1}),
+        )
+
+        result = await server.get_account_overview()
+
+        assert result["cart"]["remaining_to_minimum"] is None
+        assert result["delivery"] == {"d": 1}
+
+    async def test_add_to_cart_unexpected_read_back_failure_keeps_the_result(self, mock_client):
+        """A non-JSON 200 raises ValueError, not RohlikAPIError; the add still happened."""
+        mock_client.cart.add_items = AsyncMock(return_value=[123])
+        mock_client.cart.get_content = AsyncMock(side_effect=ValueError("Expecting value"))
+
+        result = await server.add_to_cart([{"product_id": 123}])
+
+        assert result["added"] == [123]
+        assert result["failed"] == []
+        assert "still accurate" in result["cart"]["error"]
+
+    async def test_add_to_cart_outage_does_not_claim_items_were_added(self, mock_client):
+        """An outage can fail every add and the read-back; nothing may look added."""
+        mock_client.cart.add_items = AsyncMock(return_value=[])
+        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("timeout"))
+
+        result = await server.add_to_cart([{"product_id": 123}])
+
+        assert result["added"] == []
+        assert result["failed"] == [123]
+        assert "were added" not in result["cart"]["error"]
+        assert "(timeout)" in result["cart"]["error"]
+
+    async def test_get_cart_error(self, mock_client):
+        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("nope"))
+        assert await server.get_cart() == {"error": "nope"}
 
     async def test_add_to_cart_single(self, mock_client):
         mock_client.cart.add_items = AsyncMock(return_value=[123])
+        mock_client.cart.get_content = AsyncMock(
+            return_value=Cart(
+                total_price=300.0,
+                total_items=1,
+                can_make_order=False,
+                minimum_order_price=500.0,
+                currency="CZK",
+            )
+        )
         result = await server.add_to_cart([{"product_id": 123, "quantity": 2}])
-        assert result == {"added": [123], "failed": []}
+        assert result == {
+            "added": [123],
+            "failed": [],
+            "cart": {
+                "total_price": 300.0,
+                "currency": "CZK",
+                "minimum_order_price": 500.0,
+                "remaining_to_minimum": 200.0,
+            },
+        }
         mock_client.cart.add_items.assert_awaited_once_with([{"product_id": 123, "quantity": 2}])
 
     async def test_add_to_cart_partial(self, mock_client):
         mock_client.cart.add_items = AsyncMock(return_value=[123])
+        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("read back"))
         result = await server.add_to_cart([{"product_id": 123, "quantity": 2}, {"product_id": 456}])
-        assert result == {"added": [123], "failed": [456]}
+        # A failed read-back does not hide what was added.
+        assert result["added"] == [123]
+        assert result["failed"] == [456]
+        assert "(read back)" in result["cart"]["error"]
         mock_client.cart.add_items.assert_awaited_once_with(
             [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
         )
@@ -237,65 +371,10 @@ class TestAccountAndDeliveryTools:
         result = await server.get_delivery_announcements()
         assert result["data"]["announcements"][0]["id"] == 1
 
-    async def test_get_account_overview_composes_and_omits_login(self, mock_client):
-        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
-        mock_client.orders.get_next = AsyncMock(return_value={"n": 1})
-        mock_client.orders.get_last = AsyncMock(return_value=None)
-        mock_client.cart.get_content = AsyncMock(
-            return_value=Cart(total_price=5.0, total_items=1, can_make_order=True, products=[])
-        )
-        mock_client.account.get_premium_profile = AsyncMock(return_value={"active": True})
-        mock_client.account.get_bags_info = AsyncMock(return_value={"count": 0})
-        mock_client.account.get_announcements = AsyncMock(return_value=[])
-        mock_client.delivery.get_announcements = AsyncMock(
-            return_value={"data": {"announcements": [{"id": 1}]}}
-        )
-        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
-        mock_client.delivery.get_next_slots = AsyncMock(return_value={"slot": "today"})
-
-        result = await server.get_account_overview()
-
-        assert "login" not in result
-        assert "delivered_orders" not in result
-        assert result["cart"]["total_price"] == 5.0
-        assert result["premium_profile"] == {"active": True}
-        assert result["last_order"] is None
-        assert result["delivery_announcements"]["data"]["announcements"][0]["id"] == 1
-
     async def test_get_shopping_list_bulk_surfaces_per_item_error(self, mock_client):
         mock_client.account.get_shopping_list = AsyncMock(side_effect=APIRequestFailedError("boom"))
         result = await server.get_shopping_list(["abc"])
         assert result == {"abc": {"error": "boom"}}
-
-    async def test_get_account_overview_surfaces_section_error(self, mock_client):
-        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
-        mock_client.orders.get_next = AsyncMock(return_value=None)
-        mock_client.orders.get_last = AsyncMock(return_value=None)
-        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("nope"))
-        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
-        mock_client.account.get_bags_info = AsyncMock(return_value=None)
-        mock_client.account.get_announcements = AsyncMock(return_value=None)
-        mock_client.delivery.get_announcements = AsyncMock(return_value=None)
-        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
-        mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
-
-        result = await server.get_account_overview()
-        assert result["cart"] == {"error": "nope"}
-
-    async def test_get_account_overview_reraises_unexpected_error(self, mock_client):
-        mock_client.delivery.get_info = AsyncMock(return_value={"d": 1})
-        mock_client.orders.get_next = AsyncMock(return_value=None)
-        mock_client.orders.get_last = AsyncMock(return_value=None)
-        mock_client.cart.get_content = AsyncMock(side_effect=RuntimeError("boom"))
-        mock_client.account.get_premium_profile = AsyncMock(return_value=None)
-        mock_client.account.get_bags_info = AsyncMock(return_value=None)
-        mock_client.account.get_announcements = AsyncMock(return_value=None)
-        mock_client.delivery.get_announcements = AsyncMock(return_value=None)
-        mock_client.delivery.get_timeslot_reservation = AsyncMock(return_value=None)
-        mock_client.delivery.get_next_slots = AsyncMock(return_value=None)
-
-        with pytest.raises(RuntimeError, match="boom"):
-            await server.get_account_overview()
 
     async def test_get_delivery_addresses(self, mock_client):
         mock_client.delivery.get_addresses = AsyncMock(
@@ -364,3 +443,342 @@ class TestServerMetadata:
         async with Client(server.mcp) as client:
             result = await client.call_tool("get_cart", {})
         assert result.data["total_price"] == 12.5
+
+
+_TRACKING_PAYLOAD = {
+    "orderId": 777,
+    "deliverySlot": {
+        "since": "2026-11-24T13:00:00.000+0100",
+        "till": "2026-11-24T14:00:00.000+0100",
+        "type": "ON_TIME",
+    },
+    "earlyDelivery": {"available": True, "requested": False},
+    "courier": {"displayName": "Petr"},
+    "destination": {"latitude": 50.0755, "longitude": 14.4378},
+    "progress": {
+        "deliveryStatus": "ON_THE_WAY",
+        "generatedAt": "2026-11-24T12:20:00Z",
+        "estimatedArrival": "2026-11-24T12:40:00Z",
+        "stopsBefore": 2,
+        "courierLocationStale": False,
+        "courierPosition": {"latitude": 50.0855, "longitude": 14.4378},
+    },
+}
+
+
+class TestTrackDelivery:
+    async def test_by_order_id_hides_coordinates(self, mock_client):
+        tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+        result = await server.track_delivery(order_id=777)
+        mock_client.orders.get_delivery_tracking.assert_awaited_once_with(777, raise_on_error=True)
+        assert result["status"] == "ON_THE_WAY"
+        assert result["is_active"] is True
+        assert result["stops_before"] == 2
+        # Served in UTC, returned in Prague time like the slot, so the two compare.
+        assert result["timezone"] == "Europe/Prague"
+        assert result["estimated_arrival"] == "2026-11-24T13:40:00+01:00"
+        assert result["generated_at"] == "2026-11-24T13:20:00+01:00"
+        assert result["slot_since"] == "2026-11-24T13:00:00+01:00"
+        # ~0.01 degrees of latitude is ~1.1 km.
+        assert 1000 < result["courier_distance_m"] < 1200
+        assert "50.0755" not in json.dumps(result)
+        assert "latitude" not in json.dumps(result)
+
+    async def test_times_follow_the_shops_timezone(self, mock_client, monkeypatch):
+        tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+        monkeypatch.setattr(server, "get_http_headers", lambda: {"x-rohlik-site": "ro"})
+
+        result = await server.track_delivery(order_id=777)
+
+        assert result["timezone"] == "Europe/Bucharest"
+        assert result["estimated_arrival"] == "2026-11-24T14:40:00+02:00"
+        assert result["slot_since"] == "2026-11-24T14:00:00+02:00"
+
+    async def test_before_the_order_is_queued(self, mock_client):
+        payload = {key: value for key, value in _TRACKING_PAYLOAD.items() if key != "progress"}
+        tracking = DeliveryTracking.from_api(payload)
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=tracking)
+
+        result = await server.track_delivery(order_id=777)
+
+        assert result["status"] is None
+        assert result["is_active"] is False
+        assert result["estimated_arrival"] is None
+        assert result["courier_distance_m"] is None
+        assert result["generated_at"] is None
+        assert result["slot_since"] == "2026-11-24T13:00:00+01:00"
+
+    async def test_negative_order_id_is_rejected_without_a_request(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock()
+
+        result = await server.track_delivery(order_id=-1)
+
+        assert result == {"error": "Invalid order_id: it must not be negative."}
+        mock_client.orders.get_delivery_tracking.assert_not_awaited()
+
+    async def test_by_order_id_failure_is_reported(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock(
+            side_effect=APIRequestFailedError("tracking down")
+        )
+
+        assert await server.track_delivery(order_id=777) == {"error": "tracking down"}
+
+    async def test_unrelated_value_errors_are_not_called_invalid_input(self, mock_client):
+        """Only a bad order_id is the caller's fault; anything else must surface."""
+        mock_client.orders.get_next_delivery = AsyncMock(side_effect=ValueError("bad JSON"))
+
+        with pytest.raises(ValueError, match="bad JSON"):
+            await server.track_delivery()
+
+    async def test_by_order_id_without_tracking(self, mock_client):
+        mock_client.orders.get_delivery_tracking = AsyncMock(return_value=None)
+        result = await server.track_delivery(order_id=5)
+        assert "no delivery tracking" in result
+
+    async def test_next_delivery(self, mock_client):
+        order = UpcomingOrder.from_api(
+            {
+                "id": 777,
+                "deliverySlot": {"since": "2026-11-24T13:00:00.000+0100", "type": "ON_TIME"},
+                "priceComposition": {"total": {"amount": 999.0, "currency": "CZK"}},
+            }
+        )
+        assert order is not None
+        nxt = NextDelivery.resolve(order, DeliveryTracking.from_api(_TRACKING_PAYLOAD))
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=nxt)
+        result = await server.track_delivery()
+        assert result["order_id"] == 777
+        assert result["timezone"] == "Europe/Prague"
+        assert result["eta"] == "2026-11-24T13:40:00+01:00"
+        assert result["eta_source"] == "tracking"
+        assert result["order"]["currency"] == "CZK"
+        assert result["tracking"]["status"] == "ON_THE_WAY"
+        json.dumps(result)  # fully JSON-serialisable
+
+    async def test_no_upcoming_order(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=None)
+        assert "no upcoming order" in await server.track_delivery()
+
+    async def test_api_error_is_reported(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(side_effect=APIRequestFailedError("boom"))
+        assert await server.track_delivery() == {"error": "boom"}
+
+    async def test_registered_and_callable_over_mcp(self, mock_client):
+        mock_client.orders.get_next_delivery = AsyncMock(return_value=None)
+        async with Client(server.mcp) as client:
+            result = await client.call_tool("track_delivery", {})
+        assert "no upcoming order" in result.content[0].text
+
+
+def _upcoming_order(order_id=777, since="2026-11-24T13:00:00.000+0100"):
+    order = UpcomingOrder.from_api(
+        {
+            "id": order_id,
+            "deliverySlot": {"since": since, "till": "2026-11-24T14:00:00.000+0100"},
+            "orderTime": "2026-11-23T08:00:00Z",
+            "itemsCount": 3,
+            "priceComposition": {"total": {"amount": 999.0, "currency": "CZK"}},
+        }
+    )
+    assert order is not None
+    return order
+
+
+class TestGetNextOrder:
+    async def test_returns_typed_orders_in_shop_time(self, mock_client):
+        mock_client.orders.get_upcoming = AsyncMock(return_value=[_upcoming_order()])
+
+        result = await server.get_next_order()
+
+        assert result == [
+            {
+                "id": 777,
+                "slot_id": None,
+                "slot_type": None,
+                "slot_since": "2026-11-24T13:00:00+01:00",
+                "slot_till": "2026-11-24T14:00:00+01:00",
+                # Served in UTC, returned in Prague time.
+                "order_time": "2026-11-23T09:00:00+01:00",
+                "items_count": 3,
+                "items_total_quantity": None,
+                "total_price": 999.0,
+                "currency": "CZK",
+                "available_actions": [],
+            }
+        ]
+
+    async def test_no_upcoming_order_is_a_sentence(self, mock_client):
+        """Not [], which reaches an MCP client as empty content."""
+        mock_client.orders.get_upcoming = AsyncMock(return_value=[])
+        async with Client(server.mcp) as client:
+            result = await client.call_tool("get_next_order", {})
+        assert result.content[0].text == "There is no upcoming order."
+
+    async def test_failed_relogin_is_an_error_result(self, mock_client):
+        mock_client.orders.get_upcoming = AsyncMock(
+            side_effect=APIRequestFailedError("re-login failed")
+        )
+        assert await server.get_next_order() == {"error": "re-login failed"}
+
+    async def test_failure_is_an_error_not_an_empty_list(self, mock_client):
+        mock_client.orders.get_upcoming = AsyncMock(return_value=None)
+        assert await server.get_next_order() == {"error": "Cannot fetch upcoming orders."}
+
+
+def _stub_overview(client, **overrides):
+    """Give every overview section an empty answer, then apply ``overrides``."""
+    defaults = {
+        ("delivery", "get_info"): None,
+        ("orders", "get_upcoming"): [],
+        ("orders", "get_last"): None,
+        ("cart", "get_content"): Cart(total_price=0.0, total_items=0, can_make_order=False),
+        ("account", "get_premium_profile"): None,
+        ("account", "get_bags_info"): None,
+        ("account", "get_announcements"): None,
+        ("delivery", "get_timeslot_reservation"): None,
+        ("delivery", "get_next_slots"): None,
+    }
+    for (service, method), value in defaults.items():
+        mock = overrides.get(method)
+        if mock is None:
+            mock = AsyncMock(return_value=value)
+        setattr(getattr(client, service), method, mock)
+    client.orders.get_delivery_tracking = overrides.get("get_delivery_tracking", AsyncMock())
+
+
+class TestAccountOverview:
+    async def test_composes_and_omits_login(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_info=AsyncMock(return_value={"d": 1}),
+            get_content=AsyncMock(
+                return_value=Cart(
+                    total_price=5.0,
+                    total_items=1,
+                    can_make_order=True,
+                    minimum_order_price=100.0,
+                )
+            ),
+            get_premium_profile=AsyncMock(return_value={"active": True}),
+            get_next_slots=AsyncMock(return_value={"slot": "today"}),
+        )
+
+        result = await server.get_account_overview()
+
+        assert "login" not in result
+        assert "delivered_orders" not in result
+        # Replaced by next_delivery, which carries a real ETA.
+        assert "delivery_announcements" not in result
+        assert result["delivery"] == {"d": 1}
+        assert result["cart"]["total_price"] == 5.0
+        assert result["cart"]["remaining_to_minimum"] == 95.0
+        assert result["premium_profile"] == {"active": True}
+        assert result["last_order"] is None
+        assert result["upcoming_orders"] == []
+        assert result["next_delivery"] is None
+        mock_client.orders.get_delivery_tracking.assert_not_awaited()
+
+    async def test_names_the_shop(self, mock_client, monkeypatch):
+        _stub_overview(mock_client)
+        monkeypatch.setattr(server, "get_http_headers", lambda: {"x-rohlik-site": "ro"})
+
+        result = await server.get_account_overview()
+
+        assert result["shop"] == {
+            "code": "ro",
+            "name": "Sezamo.ro",
+            "currency": "RON",
+            "timezone": "Europe/Bucharest",
+        }
+        # An empty cart takes the shop's currency.
+        assert result["cart"]["currency"] == "RON"
+
+    async def test_tracks_the_first_upcoming_order_without_refetching(self, mock_client):
+        # The library sorts upcoming orders soonest first; this checks that the
+        # first one is tracked and the list is not fetched a second time.
+        later = _upcoming_order(888, since="2026-11-25T13:00:00.000+0100")
+        soonest = _upcoming_order(777)
+        tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+        _stub_overview(
+            mock_client,
+            get_upcoming=AsyncMock(return_value=[soonest, later]),
+            get_delivery_tracking=AsyncMock(return_value=tracking),
+        )
+        mock_client.orders.get_next_delivery = AsyncMock()
+
+        result = await server.get_account_overview()
+
+        mock_client.orders.get_delivery_tracking.assert_awaited_once_with(777, raise_on_error=True)
+        mock_client.orders.get_next_delivery.assert_not_awaited()
+        mock_client.orders.get_upcoming.assert_awaited_once()
+        assert [o["id"] for o in result["upcoming_orders"]] == [777, 888]
+        nxt = result["next_delivery"]
+        assert nxt["order_id"] == 777
+        assert nxt["status"] == "ON_THE_WAY"
+        assert nxt["eta"] == "2026-11-24T13:40:00+01:00"
+        assert nxt["eta_source"] == "tracking"
+        assert "latitude" not in json.dumps(result)
+
+    async def test_without_tracking_the_eta_is_the_slot_start(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_upcoming=AsyncMock(return_value=[_upcoming_order()]),
+            get_delivery_tracking=AsyncMock(return_value=None),
+        )
+
+        nxt = (await server.get_account_overview())["next_delivery"]
+
+        assert nxt["eta"] == "2026-11-24T13:00:00+01:00"
+        assert nxt["eta_source"] == "slot"
+        assert nxt["tracking"] is None
+
+    async def test_tracking_failure_only_fails_that_section(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_upcoming=AsyncMock(return_value=[_upcoming_order()]),
+            get_delivery_tracking=AsyncMock(side_effect=APIRequestFailedError("no tracking")),
+        )
+
+        result = await server.get_account_overview()
+
+        assert result["next_delivery"] == {"error": "no tracking"}
+        assert result["upcoming_orders"][0]["id"] == 777
+
+    async def test_tracking_for_another_order_is_reported(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_upcoming=AsyncMock(return_value=[_upcoming_order(555)]),
+            get_delivery_tracking=AsyncMock(
+                return_value=DeliveryTracking.from_api(_TRACKING_PAYLOAD)
+            ),
+        )
+
+        nxt = (await server.get_account_overview())["next_delivery"]
+
+        assert nxt["error"].startswith("Inconsistent delivery tracking")
+
+    async def test_upcoming_orders_failure(self, mock_client):
+        _stub_overview(mock_client, get_upcoming=AsyncMock(return_value=None))
+
+        result = await server.get_account_overview()
+
+        assert result["upcoming_orders"] == {"error": "Cannot fetch upcoming orders."}
+        assert "error" in result["next_delivery"]
+        mock_client.orders.get_delivery_tracking.assert_not_awaited()
+
+    async def test_surfaces_section_error(self, mock_client):
+        _stub_overview(
+            mock_client, get_content=AsyncMock(side_effect=APIRequestFailedError("nope"))
+        )
+
+        result = await server.get_account_overview()
+
+        assert result["cart"] == {"error": "nope"}
+
+    async def test_reraises_unexpected_error(self, mock_client):
+        _stub_overview(mock_client, get_content=AsyncMock(side_effect=RuntimeError("boom")))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await server.get_account_overview()
