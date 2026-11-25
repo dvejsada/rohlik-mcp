@@ -238,6 +238,26 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 > ⚠️ **`add_to_cart` and `remove_from_cart` change your real shop cart.**
 > Everything else is read-only.
 
+### ⬆️ Upgrading to 0.6.0
+
+Tool names are unchanged, but some results changed shape. Update any prompts or
+automations that read these fields:
+
+- **`get_next_order`** returns compact upcoming orders, soonest first: `id`,
+  `slot_since`/`slot_till`, `order_time`, `items_count`, `total_price`,
+  `currency`. The raw shop fields (`deliverySlot`, `priceComposition`, the
+  address, …) are gone; use `get_order_detail` for full detail. With no upcoming
+  order it returns the sentence "There is no upcoming order.", and a failure is
+  an `{"error": ...}` result.
+- **`get_account_overview`**: `next_order` is now `upcoming_orders`, in the same
+  compact form. `delivery_announcements` is removed; the new `next_delivery`
+  section has the live status and arrival estimate instead (as from
+  `track_delivery`). A `shop` section comes first.
+- **`get_cart`** and the overview's `cart` add `remaining_to_minimum`;
+  **`add_to_cart`** adds a `cart` summary.
+- **`ROHLIK_BASE_URL`** set to another address than a shop's own now pins the
+  server to its `ROHLIK_SITE` shop (see [Configuration](#️-configuration)).
+
 ---
 
 ## ⚙️ Configuration

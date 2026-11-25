@@ -201,7 +201,17 @@ class TestCartTools:
 
     @pytest.mark.parametrize(
         ("total", "minimum", "remaining"),
-        [(512.3, 1000.0, 487.7), (1000.0, 1000.0, 0.0), (1500.0, 1000.0, 0.0), (5.0, 0.0, 0.0)],
+        [
+            (512.3, 1000.0, 487.7),
+            (1000.0, 1000.0, 0.0),
+            (1500.0, 1000.0, 0.0),
+            # An anonymous cart reports a minimum of 0: unknown, not "big enough".
+            (5.0, 0.0, None),
+            # Malformed amounts give "unknown" instead of crashing.
+            (None, 1000.0, None),
+            (500.0, "1000", None),
+            (500.0, True, None),
+        ],
     )
     async def test_get_cart_remaining_to_minimum(self, mock_client, total, minimum, remaining):
         mock_client.cart.get_content = AsyncMock(
@@ -218,6 +228,31 @@ class TestCartTools:
         assert result["remaining_to_minimum"] == remaining
         assert result["minimum_order_price"] == minimum
         assert result["currency"] == "EUR"
+
+    async def test_malformed_cart_does_not_break_the_overview(self, mock_client):
+        _stub_overview(
+            mock_client,
+            get_content=AsyncMock(
+                return_value=Cart.from_api({"data": {"totalPrice": None, "minimalOrderPrice": 749}})
+            ),
+            get_info=AsyncMock(return_value={"d": 1}),
+        )
+
+        result = await server.get_account_overview()
+
+        assert result["cart"]["remaining_to_minimum"] is None
+        assert result["delivery"] == {"d": 1}
+
+    async def test_add_to_cart_unexpected_read_back_failure_keeps_the_result(self, mock_client):
+        """A non-JSON 200 raises ValueError, not RohlikAPIError; the add still happened."""
+        mock_client.cart.add_items = AsyncMock(return_value=[123])
+        mock_client.cart.get_content = AsyncMock(side_effect=ValueError("Expecting value"))
+
+        result = await server.add_to_cart([{"product_id": 123}])
+
+        assert result["added"] == [123]
+        assert result["failed"] == []
+        assert "Items were added" in result["cart"]["error"]
 
     async def test_get_cart_error(self, mock_client):
         mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("nope"))
@@ -252,7 +287,9 @@ class TestCartTools:
         mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("read back"))
         result = await server.add_to_cart([{"product_id": 123, "quantity": 2}, {"product_id": 456}])
         # A failed read-back does not hide what was added.
-        assert result == {"added": [123], "failed": [456], "cart": {"error": "read back"}}
+        assert result["added"] == [123]
+        assert result["failed"] == [456]
+        assert result["cart"]["error"].endswith("read back")
         mock_client.cart.add_items.assert_awaited_once_with(
             [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
         )
@@ -558,9 +595,18 @@ class TestGetNextOrder:
             }
         ]
 
-    async def test_no_upcoming_order_is_an_empty_list(self, mock_client):
+    async def test_no_upcoming_order_is_a_sentence(self, mock_client):
+        """Not [], which reaches an MCP client as empty content."""
         mock_client.orders.get_upcoming = AsyncMock(return_value=[])
-        assert await server.get_next_order() == []
+        async with Client(server.mcp) as client:
+            result = await client.call_tool("get_next_order", {})
+        assert result.content[0].text == "There is no upcoming order."
+
+    async def test_failed_relogin_is_an_error_result(self, mock_client):
+        mock_client.orders.get_upcoming = AsyncMock(
+            side_effect=APIRequestFailedError("re-login failed")
+        )
+        assert await server.get_next_order() == {"error": "re-login failed"}
 
     async def test_failure_is_an_error_not_an_empty_list(self, mock_client):
         mock_client.orders.get_upcoming = AsyncMock(return_value=None)
@@ -635,7 +681,9 @@ class TestAccountOverview:
         # An empty cart takes the shop's currency.
         assert result["cart"]["currency"] == "RON"
 
-    async def test_tracks_the_soonest_order_without_refetching(self, mock_client):
+    async def test_tracks_the_first_upcoming_order_without_refetching(self, mock_client):
+        # The library sorts upcoming orders soonest first; this checks that the
+        # first one is tracked and the list is not fetched a second time.
         later = _upcoming_order(888, since="2026-11-25T13:00:00.000+0100")
         soonest = _upcoming_order(777)
         tracking = DeliveryTracking.from_api(_TRACKING_PAYLOAD)

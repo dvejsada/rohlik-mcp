@@ -24,7 +24,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, tzinfo
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 from zoneinfo import ZoneInfo
 
 import mcp.types as mt
@@ -581,16 +581,26 @@ def _cart_fields(cart: Cart, shop: Site) -> dict[str, Any]:
     """Serialise a cart and add how far it is from the shop's minimum order.
 
     ``remaining_to_minimum`` is ``0`` once the total reaches the minimum, and
-    ``null`` when the shop reports no minimum. ``currency`` falls back to the
+    ``null`` when it cannot be worked out: no minimum is reported, the minimum
+    is ``0`` (what the shop reports for an anonymous cart, so not a real
+    minimum), or either amount is not a number. ``currency`` falls back to the
     shop's when the cart has no items to take it from.
     """
     fields: dict[str, Any] = _serialize(cart)
     fields["currency"] = cart.currency or shop.currency
-    minimum = cart.minimum_order_price
-    fields["remaining_to_minimum"] = (
-        round(max(0.0, minimum - cart.total_price), 2) if minimum is not None else None
-    )
+    minimum, total = cart.minimum_order_price, cart.total_price
+    remaining: float | None = None
+    # The model does not validate types, so a malformed payload must give
+    # "unknown" here rather than a TypeError.
+    if _is_number(minimum) and _is_number(total) and minimum > 0:
+        remaining = round(max(0.0, minimum - total), 2)
+    fields["remaining_to_minimum"] = remaining
     return fields
+
+
+def _is_number(value: object) -> TypeGuard[float]:
+    """Whether ``value`` is a real int or float (``bool`` is not a number here)."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
 
 
 @mcp.tool()
@@ -598,7 +608,8 @@ async def get_cart() -> ToolResult:
     """Get the current shopping cart: items, total price and currency.
 
     Also returns the shop's ``minimum_order_price`` and ``remaining_to_minimum``,
-    the amount still needed before an order can be placed (``0`` once reached).
+    the amount still needed before an order can be placed (``0`` once reached,
+    ``null`` when the shop reports no usable minimum - then say it is unknown).
     ``can_make_order`` covers more than the minimum (e.g. a chosen delivery
     slot), so use ``remaining_to_minimum`` to answer "is my cart big enough?".
     """
@@ -621,10 +632,12 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
             add just one product.
 
     Returns the product IDs that were successfully added and any that failed,
-    plus a ``cart`` summary afterwards: ``total_price``, ``currency`` and
-    ``remaining_to_minimum`` (the amount still needed to reach the shop's
-    minimum order; ``0`` once reached). The summary is an ``{"error": ...}``
-    if the cart could not be read back; the items were still added.
+    plus a ``cart`` summary afterwards: ``total_price``, ``currency``,
+    ``minimum_order_price`` and ``remaining_to_minimum`` (the amount still
+    needed to reach the shop's minimum order; ``0`` once reached, ``null`` when
+    unknown). The summary is an ``{"error": ...}`` if the cart could not be read
+    back; the items in ``added`` were still added, so do not add them again.
+    An empty ``items`` list changes nothing and returns no summary.
     """
     if not items:
         return {"added": [], "failed": []}
@@ -651,8 +664,11 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
     summary: dict[str, Any]
     try:
         cart = _cart_fields(await client.cart.get_content(), read_shop(get_config()))
-    except RohlikAPIError as err:
-        summary = {"error": str(err)}
+    except Exception as err:  # noqa: BLE001 - the add already happened
+        # Whatever went wrong, the items were added: report that, or the model
+        # will retry and add them twice.
+        _LOGGER.warning("Cart read-back after add_to_cart failed: %r", err)
+        summary = {"error": f"Items were added, but the cart could not be read back: {err}"}
     else:
         summary = {
             key: cart[key]
@@ -734,15 +750,21 @@ async def get_next_order() -> ToolResult:
     """Get the upcoming (not yet delivered) orders, soonest delivery first.
 
     Each has its ``id``, delivery slot, order time, item count, total price and
-    currency; times are in the shop's timezone. An empty list means there is no
-    upcoming order. For an order's line items use ``get_order_detail``; for
-    when it will arrive use ``track_delivery``.
+    currency; times are in the shop's timezone. For an order's line items use
+    ``get_order_detail``; for when it will arrive use ``track_delivery``.
     """
     client = await get_client()
     tz = _shop_tz(read_shop(get_config()))
-    orders = await client.orders.get_upcoming()
+    try:
+        orders = await client.orders.get_upcoming()
+    except RohlikAPIError as err:
+        # Reads return None on failure, but a failed re-login after a 401 raises.
+        return {"error": str(err)}
     if orders is None:
         return {"error": "Cannot fetch upcoming orders."}
+    if not orders:
+        # A sentence, not [], which some clients would show as no output at all.
+        return "There is no upcoming order."
     serialized: list[Any] = _serialize(orders, tz)
     return serialized
 
