@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections import OrderedDict
@@ -599,8 +600,8 @@ def _cart_fields(cart: Cart, shop: Site) -> dict[str, Any]:
 
 
 def _is_number(value: object) -> TypeGuard[float]:
-    """Whether ``value`` is a real int or float (``bool`` is not a number here)."""
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    """Whether ``value`` is a finite int or float (``bool`` is not a number here)."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
 
 @mcp.tool()
@@ -636,7 +637,7 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
     ``minimum_order_price`` and ``remaining_to_minimum`` (the amount still
     needed to reach the shop's minimum order; ``0`` once reached, ``null`` when
     unknown). The summary is an ``{"error": ...}`` if the cart could not be read
-    back; the items in ``added`` were still added, so do not add them again.
+    back; ``added`` and ``failed`` are still accurate, so do not re-add ``added``.
     An empty ``items`` list changes nothing and returns no summary.
     """
     if not items:
@@ -665,10 +666,15 @@ async def add_to_cart(items: list[dict[str, int]]) -> ToolResult:
     try:
         cart = _cart_fields(await client.cart.get_content(), read_shop(get_config()))
     except Exception as err:  # noqa: BLE001 - the add already happened
-        # Whatever went wrong, the items were added: report that, or the model
-        # will retry and add them twice.
+        # Whatever went wrong here, added/failed below are still accurate; say
+        # so, or the model may retry and add the items twice. (A shop outage
+        # can fail every add *and* the read-back, so do not claim anything was
+        # added.)
         _LOGGER.warning("Cart read-back after add_to_cart failed: %r", err)
-        summary = {"error": f"Items were added, but the cart could not be read back: {err}"}
+        summary = {
+            "error": f"The cart could not be read back ({err}); "
+            "'added' and 'failed' are still accurate."
+        }
     else:
         summary = {
             key: cart[key]

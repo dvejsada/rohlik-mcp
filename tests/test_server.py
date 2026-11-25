@@ -211,6 +211,8 @@ class TestCartTools:
             (None, 1000.0, None),
             (500.0, "1000", None),
             (500.0, True, None),
+            (float("nan"), 1000.0, None),
+            (500.0, float("inf"), None),
         ],
     )
     async def test_get_cart_remaining_to_minimum(self, mock_client, total, minimum, remaining):
@@ -252,7 +254,19 @@ class TestCartTools:
 
         assert result["added"] == [123]
         assert result["failed"] == []
-        assert "Items were added" in result["cart"]["error"]
+        assert "still accurate" in result["cart"]["error"]
+
+    async def test_add_to_cart_outage_does_not_claim_items_were_added(self, mock_client):
+        """An outage can fail every add and the read-back; nothing may look added."""
+        mock_client.cart.add_items = AsyncMock(return_value=[])
+        mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("timeout"))
+
+        result = await server.add_to_cart([{"product_id": 123}])
+
+        assert result["added"] == []
+        assert result["failed"] == [123]
+        assert "were added" not in result["cart"]["error"]
+        assert "(timeout)" in result["cart"]["error"]
 
     async def test_get_cart_error(self, mock_client):
         mock_client.cart.get_content = AsyncMock(side_effect=APIRequestFailedError("nope"))
@@ -289,7 +303,7 @@ class TestCartTools:
         # A failed read-back does not hide what was added.
         assert result["added"] == [123]
         assert result["failed"] == [456]
-        assert result["cart"]["error"].endswith("read back")
+        assert "(read back)" in result["cart"]["error"]
         mock_client.cart.add_items.assert_awaited_once_with(
             [{"product_id": 123, "quantity": 2}, {"product_id": 456, "quantity": 1}]
         )

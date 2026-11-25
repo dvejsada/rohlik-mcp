@@ -243,7 +243,8 @@ exception is `get_product_cards`, which returns a **list** of product cards.
 Tool names are unchanged, but some results changed shape. Update any prompts or
 automations that read these fields:
 
-- **`get_next_order`** returns compact upcoming orders, soonest first: `id`,
+- **`get_next_order`** returns a **list** of compact upcoming orders (0.5.0
+  passed the shop's raw response through), soonest first: `id`,
   `slot_since`/`slot_till`, `order_time`, `items_count`, `total_price`,
   `currency`. The raw shop fields (`deliverySlot`, `priceComposition`, the
   address, …) are gone; use `get_order_detail` for full detail. With no upcoming
@@ -253,7 +254,8 @@ automations that read these fields:
   compact form. `delivery_announcements` is removed; the new `next_delivery`
   section has the live status and arrival estimate instead (as from
   `track_delivery`). A `shop` section comes first.
-- **`get_cart`** and the overview's `cart` add `remaining_to_minimum`;
+- **`get_cart`** and the overview's `cart` add `remaining_to_minimum`, and an
+  empty cart's `currency` is the shop's instead of empty;
   **`add_to_cart`** adds a `cart` summary.
 - **`ROHLIK_BASE_URL`** set to another address than a shop's own now pins the
   server to its `ROHLIK_SITE` shop (see [Configuration](#️-configuration)).
